@@ -56,13 +56,25 @@ void matmul_v1(const float *A, const float *B, float *C, int M, int N, int K)
 		for(j=0; j<N; j++) {
 			float sum = 0.0f;
 			for(k=0; k<K; k++) {
+				C[i + j*M] += A[i + k*M] * B[k + j*K];
+			}
+		}
+	}
+}
+
+void matmul_v2(const float *A, const float *B, float *C, int M, int N, int K)
+{
+	int i, j, k;
+	for(i=0; i<M; i++) {
+		for(j=0; j<N; j++) {
+			float sum = 0.0f;
+			for(k=0; k<K; k++) {
 				sum += A[i + k*M] * B[k + j*K];
 			}
 			C[i + j*M] = sum;
 		}
 	}
 }
-
 
 int main(int argc, char *argv[])
 {

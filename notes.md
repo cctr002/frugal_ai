@@ -106,10 +106,22 @@ inner_loop numpy with jit : 0.13032007217407227
 
 
 
-## 9
+### 9
 export OMP_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
 gcc matmul.c -o matmul -lopenblas -lm
-
-Regular sgemm time: 0.106376 s
-Custom sgemm time: 12.724832 s
+v1
+sans opti
+Regular sgemm time: 0.029145 s
+Custom sgemm time: 18.438492 s
+avec O1
+Regular sgemm time: 0.028130 s
+Custom sgemm time: 12.548904 s
+avec O2
+Regular sgemm time: 0.029036 s
+Custom sgemm time: 4.975965 s
+avec 03
+Regular sgemm time: 0.038430 s
+Custom sgemm time: 5.002741 s
+### 10
+v2
