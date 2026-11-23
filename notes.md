@@ -124,4 +124,64 @@ avec 03
 Regular sgemm time: 0.038430 s
 Custom sgemm time: 5.002741 s
 ### 10
-v2
+v2Q10 | size=1920 | no flags
+matmul_v1: 18.386041 +/- 0.065395 s (sample SD, 3 runs) | 0.55% of OpenBLAS performance
+
+Q10 | size=1920 | -O1
+matmul_v1: 12.243066 +/- 0.092851 s (sample SD, 3 runs) | 0.82% of OpenBLAS performance
+
+Q10 | size=1920 | -O2
+matmul_v1: 5.393907 +/- 0.241968 s (sample SD, 3 runs) | 1.86% of OpenBLAS performance
+
+Q10 | size=1920 | -O3
+matmul_v1: 5.458942 +/- 0.088816 s (sample SD, 3 runs) | 1.86% of OpenBLAS performance
+
+### 12
+Q12 | size=1920 | no flags
+matmul_v2: 12.948144 +/- 0.064434 s (sample SD, 3 runs) | 0.79% of OpenBLAS performance
+
+Q12 | size=1920 | -O1
+matmul_v2: 4.791312 +/- 0.088082 s (sample SD, 3 runs) | 2.12% of OpenBLAS performance
+
+Q12 | size=1920 | -O2
+matmul_v2: 4.922585 +/- 0.034357 s (sample SD, 3 runs) | 2.06% of OpenBLAS performance
+
+Q12 | size=1920 | -O3
+matmul_v2: 5.257009 +/- 0.005630 s (sample SD, 3 runs) | 1.90% of OpenBLAS performance
+### 14
+Q14 | size=1920 | no flags
+matmul_v3: 12.092632 +/- 0.112505 s (sample SD, 3 runs) | 0.83% of OpenBLAS performance
+
+Q14 | size=1920 | -O1
+matmul_v3: 2.957555 +/- 0.073706 s (sample SD, 3 runs) | 3.53% of OpenBLAS performance
+
+Q14 | size=1920 | -O2
+matmul_v3: 2.887041 +/- 0.036149 s (sample SD, 3 runs) | 3.46% of OpenBLAS performance
+
+Q14 | size=1920 | -O3
+matmul_v3: 2.936007 +/- 0.075118 s (sample SD, 3 runs) | 3.39% of OpenBLAS performance
+### 16
+
+Q16 | size=1920 | -O3
+matmul_v3: 2.914556 +/- 0.051842 s (sample SD, 3 runs) | 3.41% of OpenBLAS performance
+
+Q16 | size=1920 | -O3 -march=native
+matmul_v3: 2.897664 +/- 0.038998 s (sample SD, 3 runs) | 3.45% of OpenBLAS performance
+
+Q16 | size=1920 | -O3 -funroll-loops
+matmul_v3: 2.960590 +/- 0.081440 s (sample SD, 3 runs) | 3.33% of OpenBLAS performance
+
+Q16 | size=1920 | -O3 -ffast-math
+matmul_v3: 0.793544 +/- 0.076209 s (sample SD, 3 runs) | 13.29% of OpenBLAS performance
+
+Q16 | size=1920 | -O3 -march=native -funroll-loops
+matmul_v3: 2.938548 +/- 0.029292 s (sample SD, 3 runs) | 3.36% of OpenBLAS performance
+
+Q16 | size=1920 | -O3 -march=native -ffast-math
+matmul_v3: 0.585161 +/- 0.032646 s (sample SD, 3 runs) | 17.14% of OpenBLAS performance
+
+Q16 | size=1920 | -O3 -funroll-loops -ffast-math
+matmul_v3: 0.764746 +/- 0.032309 s (sample SD, 3 runs) | 13.29% of OpenBLAS performance
+
+Q16 | size=1920 | -O3 -march=native -funroll-loops -ffast-math
+matmul_v3: 0.476791 +/- 0.012910 s (sample SD, 3 runs) | 21.19% of OpenBLAS performance

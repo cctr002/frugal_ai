@@ -18,7 +18,7 @@ def compile_c(executable, flags):
     )
 
 
-def measure(executable, size, version, repeats=5):
+def measure(executable, size, version, repeats=3):
     """Return custom mean, sample standard deviation, and OpenBLAS mean (seconds)."""
     times, blas_times = [], []
     for _ in range(repeats):
@@ -37,7 +37,7 @@ def search_flags(question, size=1920):
     """Print five-run measurements for every compilation combination requested."""
     versions = {
         10: ["matmul_v1"],
-        12: ["matmul_v1", "matmul_v2"],
+        12: ["matmul_v2"],
         14: ["matmul_v3"],
         16: ["matmul_v3"],
     }[question]
@@ -53,12 +53,11 @@ def search_flags(question, size=1920):
             print(f"\nQ{question} | size={size} | {options or 'no flags'}", flush=True)
             for version in versions:
                 avg, sd, blas = measure(executable, size, version)
-                print(f"{version}: {avg:.6f} +/- {sd:.6f} s (sample SD, 5 runs)"
+                print(f"{version}: {avg:.6f} +/- {sd:.6f} s (sample SD, 3 runs)"
                       f" | {100*blas/avg:.2f}% of OpenBLAS performance", flush=True)
 
 
-def plot_compare_FLOPS(m_sizes, versions, flags="-O3", name="matmul", repeats=5):
-    """Same plotting convention as matmul.py; timings come from the C program."""
+def plot_compare_FLOPS(m_sizes, versions, flags="-O3", name="matmul", repeats=3):
     import matplotlib.pyplot as plt
 
     m_sizes = list(m_sizes)
@@ -72,7 +71,7 @@ def plot_compare_FLOPS(m_sizes, versions, flags="-O3", name="matmul", repeats=5)
             speeds = []
             for size in m_sizes:
                 avg, sd, _ = measure(executable, size, version, repeats)
-                speed = size**3 / (avg*1e9)  # Same convention as the Python plots.
+                speed = size**3 / (avg*1e9) 
                 speeds.append(speed)
                 writer.writerow([version, size, flags, avg, sd, speed])
                 print(f"{version}, N={size}: {avg:.6f} +/- {sd:.6f} s", flush=True)
@@ -86,8 +85,7 @@ def plot_compare_FLOPS(m_sizes, versions, flags="-O3", name="matmul", repeats=5)
 
 
 if __name__ == "__main__":
-    search_flags(question=14, size=1920)
-    # search_flags(question=16, size=1920)
+    search_flags(question=16, size=1920)
     # plot_compare_FLOPS(range(128, 4097, 128),
     #     versions=["matmul_v1", "matmul_v2", "matmul_v3", "OpenBLAS"],
     #     flags="-O3 -march=native -funroll-loops -ffast-math", name="q17")
