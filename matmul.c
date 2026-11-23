@@ -51,14 +51,14 @@ void matmul_blas(const float* A, const float* B, float* C, int M, int N, int K)
 //Naive triple loop matmul
 void matmul_v1(const float *A, const float *B, float *C, int M, int N, int K)
 {
-	// Add your own naive 3-loop implementation here
-	for(i=0; i<M; i++) { 
-		for(j=0; i<N; j++) {
-			double sum = 0.0
-			for(k=0;k<K;k++) {
-				sum +=1[i*K+k]*B[k*N + j];
+	int i, j, k;
+	for(i=0; i<M; i++) {
+		for(j=0; j<N; j++) {
+			float sum = 0.0f;
+			for(k=0; k<K; k++) {
+				sum += A[i + k*M] * B[k + j*K];
 			}
-			C[i*N+j] = sum;
+			C[i + j*M] = sum;
 		}
 	}
 }
