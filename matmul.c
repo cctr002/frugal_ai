@@ -1,6 +1,7 @@
 
 #include <stdlib.h>
 #include <stdio.h>
+#include <string.h>
 #include <cblas.h>
 
 #include <sys/time.h>
@@ -76,6 +77,24 @@ void matmul_v2(const float *A, const float *B, float *C, int M, int N, int K)
 	}
 }
 
+// Q14: transpose A so both reads in the inner loop are contiguous.
+void matmul_v3(const float *A, const float *B, float *C, int M, int N, int K)
+{
+	float *AT = malloc((size_t)M*K*sizeof(float));
+	if (!AT) { perror("AT"); exit(EXIT_FAILURE); }
+	for (int i = 0; i < M; i++)
+		for (int k = 0; k < K; k++)
+			AT[k + i*K] = A[i + k*M];
+	for (int j = 0; j < N; j++)
+		for (int i = 0; i < M; i++) {
+			float sum = 0.0f;
+			for (int k = 0; k < K; k++)
+				sum += AT[k + i*K] * B[k + j*K];
+			C[i + j*M] = sum;
+		}
+	free(AT);
+}
+
 int main(int argc, char *argv[])
 {
 	size_t i;
@@ -83,11 +102,22 @@ int main(int argc, char *argv[])
 	int l_size, M, N, K;
 	float *A, *B, *C, *C_blas;
 
-	if (argc == 2)
+	if (argc >= 2)
 		l_size = atoi(argv[1]);
 	else
 		l_size = 512;
 	
+	void (*matmul)(const float *, const float *, float *, int, int, int) = matmul_v1;
+	if (argc >= 3) {
+		if (strcmp(argv[2], "matmul_v2") == 0) matmul = matmul_v2;
+		else if (strcmp(argv[2], "matmul_v3") == 0) matmul = matmul_v3;
+		else if (strcmp(argv[2], "OpenBLAS") == 0) matmul = matmul_blas;
+		else if (strcmp(argv[2], "matmul_v1") != 0) {
+			fprintf(stderr, "Unknown implementation: %s\n", argv[2]);
+			return EXIT_FAILURE;
+		}
+	}
+
 	M = l_size; N = l_size; K = l_size;
 
 	create_matrices(&A, &B, &C, &C_blas, M, N, K);
@@ -100,7 +130,7 @@ int main(int argc, char *argv[])
 
 	init_timing(&timer);
 
-	matmul_v1(A,B,C,M,N,K); //your custom matmul implementation
+	matmul(A,B,C,M,N,K); // selected implementation; v1 by default
 	
 	printf("Custom sgemm time: %f s\n", elapsed_time(timer));
 	
