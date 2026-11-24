@@ -97,7 +97,7 @@ void matmul_v3(const float *A, const float *B, float *C, int M, int N, int K)
 }
 
 
-//v3 + manual vectorization through memory aligned SIMD operations 
+//v3 + manual vectorization through memory aligned SIMD operations
 //Note, require C11 ISO, not compatible with C99 while auto vectorization is compatible
 
 // Define a memory aligned vector type of 32 Bytes -> 8 float of 4 bytes (32 bits) each
@@ -110,14 +110,14 @@ void matmul_v4(const float *A, const float *B, float *C, int M, int N, int K)
 		printf("Error, mismatch between matrix size and kernel size");
 		exit(EXIT_FAILURE);
 	}
-	
+
 	//1° Create the vectorized versions of A and B
 	typedef float vec __attribute__((vector_size(32)));
 
 	int n_vectors = K/8;
 	vec *AT_vec = aligned_alloc(sizeof(vec), (size_t)M* n_vectors* sizeof(vec));
 	vec *B_vec = aligned_alloc(sizeof(vec), (size_t)N* n_vectors* sizeof(vec));
-	
+
 	//2° Fill the vectorized versions
 	for (int i = 0; i<M; i++) {
 		for(int v= 0; v<n_vectors;v++) {
@@ -151,14 +151,87 @@ void matmul_v4(const float *A, const float *B, float *C, int M, int N, int K)
 	}
 	free(AT_vec);
 	free(B_vec);
-}	
+}
+
+
+
+//Matmul using FMA operation on a sub-part of C and optimizing the cache usage
+//No need for transposition in this version as most of the work is done in cache anyway
+
+#ifndef ker_w
+#define ker_w 6
+#endif
+#ifndef ker_h
+#define ker_h 16
+#endif
+#if ker_h <= 0 || ker_h % 8 != 0 || ker_w <= 0
+#error "ker_h must be a positive multiple of 8; ker_w must be positive"
+#endif
+
+void kernel(const float *_a, const float *_b, float *_c,
+	int M, int N, int K, int i, int j, int k_start, int k_stop)
+{
+	int k, b_m, b_n, l;
+	float val;
+	(void)N;
+	//declared in cache
+	vec t[ker_h/8][ker_w] = {0};
+
+	//1° Loop over k that do the vectorized accumulate inside the kernel region using an implicit fma instruction
+	for (k = k_start; k < k_stop; k++) {
+		// 1.1 Loop over ker_w
+		for (b_n = 0; b_n < ker_w; b_n++) {
+
+			// Broadcast the b[k] value into a beta vector
+			val = _b[k + (j+b_n)*K];
+			vec beta;
+			for (l = 0; l < 8; l++) beta[l] = val;
+
+			// 1.2 Loop over the vectors in A (ker_h/8)
+			for (b_m = 0; b_m < ker_h/8; b_m++) {
+				// Fill an alpha vector with the content of the current vector of A
+				vec alpha;
+				for (l = 0; l < 8; l++)
+					alpha[l] = _a[i + 8*b_m + l + k*M];
+				// Accumulate alpha * beta into the current vector cell of t[][]. Doing so with vectors will implicitely call an FMA operation.
+				t[b_m][b_n] += alpha * beta;
+			}
+		}
+	}
+
+
+	//2° accumulate the result in the corresponding region of C
+	for (b_n = 0; b_n < ker_w; b_n++)
+		for (b_m = 0; b_m < ker_h/8; b_m++)
+			for (l = 0; l < 8; l++)
+				_c[i + 8*b_m + l + (j+b_n)*M] += t[b_m][b_n][l];
+}
+
+
+void matmul_v5(const float *A, const float *B, float *C, int M, int N, int K)
+{
+	int i,j;
+
+	if(M % ker_h != 0 || N % ker_w != 0)
+	{
+		printf("Error, mismatch between matrix size and kernel size");
+		exit(EXIT_FAILURE);
+	}
+
+	//Simple loop over M and N kernel regions that call the kernel over the whole K dimension (k_start = 0, k_stop = K)
+	for (size_t cell = 0; cell < (size_t)M*N; cell++) C[cell] = 0.0f;
+	for (j = 0; j < N; j += ker_w)
+		for (i = 0; i < M; i += ker_h)
+			kernel(A, B, C, M, N, K, i, j, 0, K);
+
+}
 
 
 
 int main(int argc, char *argv[])
 {
 	size_t i;
-	
+
 	int l_size, M, N, K;
 	float *A, *B, *C, *C_blas;
 
@@ -166,13 +239,14 @@ int main(int argc, char *argv[])
 		l_size = atoi(argv[1]);
 	else
 		l_size = 512;
-	
+
 	void (*matmul)(const float *, const float *, float *, int, int, int) = matmul_v1;
 	if (argc >= 3) {
 		if (strcmp(argv[2], "matmul_v2") == 0) matmul = matmul_v2;
 		else if (strcmp(argv[2], "matmul_v3") == 0) matmul = matmul_v3;
 		else if (strcmp(argv[2], "OpenBLAS") == 0) matmul = matmul_blas;
 		else if (strcmp(argv[2], "matmul_v4") ==0) matmul = matmul_v4;
+		else if (strcmp(argv[2], "matmul_v5") == 0) matmul = matmul_v5;
 		else if (strcmp(argv[2], "matmul_v1") != 0) {
 			fprintf(stderr, "Unknown implementation: %s\n", argv[2]);
 			return EXIT_FAILURE;
@@ -192,9 +266,9 @@ int main(int argc, char *argv[])
 	init_timing(&timer);
 
 	matmul(A,B,C,M,N,K); // selected implementation; v1 by default
-	
+
 	printf("Custom sgemm time: %f s\n", elapsed_time(timer));
-	
+
 	//Verify the content of C against the OpenBLAS matmul
 	for (i = 0; i < M*N; i++)
 		if((C[i] - C_blas[i])*(C[i] - C_blas[i]) > 0.00001)
@@ -206,5 +280,5 @@ int main(int argc, char *argv[])
 	exit(EXIT_SUCCESS);
 }
 
-		
-		
+
+

@@ -41,13 +41,14 @@ def search_flags(question, size=1920):
         14: ["matmul_v3"],
         16: ["matmul_v3"],
         19: ["matmul_v4"],
+        22: ["matmul_v3", "matmul_v4", "matmul_v5"],
     }[question]
     flags = ["", "-O1", "-O2", "-O3"]
     if question == 16:
         extra = ["-march=native", "-funroll-loops", "-ffast-math"]
         flags = [" ".join(("-O3", *combo))
                  for n in range(len(extra)+1) for combo in combinations(extra, n)]
-    if question == 19:
+    if question in (19, 22):
         extra = ["-march=native", "-funroll-loops", "-ffast-math"]
         flags.append("-O3 -march=native -funroll-loops -ffast-math")
     with TemporaryDirectory() as directory:
@@ -59,6 +60,23 @@ def search_flags(question, size=1920):
                 avg, sd, blas = measure(executable, size, version)
                 print(f"{version}: {avg:.6f} +/- {sd:.6f} s (sample SD, 3 runs)"
                         f" | {100*blas/avg:.2f}% of OpenBLAS performance", flush=True)
+
+
+def test_kernel_sizes(sizes=(240, 1920), kernels=((8, 6), (16, 6), (16, 8)),
+                      flags="-O3 -march=native -funroll-loops -ffast-math"):
+    """Q24: compare kernel dimensions at one small and one large matrix size."""
+    with TemporaryDirectory() as directory:
+        executable = Path(directory) / "matmul"
+        for height, width in kernels:
+            if height <= 0 or height % 8 or width <= 0 or any(
+                    size % height or size % width for size in sizes):
+                raise ValueError("Sizes must be multiples of kernel height and width; height must be a multiple of 8.")
+            compile_c(executable, f"{flags} -Dker_h={height} -Dker_w={width}")
+            print(f"\nKernel {height}x{width}: {height//8*width} vector accumulators", flush=True)
+            for size in sizes:
+                avg, sd, blas = measure(executable, size, "matmul_v5")
+                print(f"N={size}: {avg:.6f} +/- {sd:.6f} s"
+                      f" | {100*blas/avg:.2f}% of OpenBLAS performance", flush=True)
 
 
 def plot_compare_FLOPS(m_sizes, versions, name="matmul", repeats=3):
@@ -89,6 +107,13 @@ def plot_compare_FLOPS(m_sizes, versions, name="matmul", repeats=3):
     plt.show()
 
 if __name__ == "__main__":
+    search_flags(22)
+    # Q24: test_kernel_sizes()
+    # Q23: replace these flags with the best configuration measured in Q22.
+    # best_flags = "-O3 -march=native -funroll-loops -ffast-math"
+    # plot_compare_FLOPS(range(48, 3841, 48),
+    #     versions=[("matmul_v4", best_flags), ("matmul_v5", best_flags),
+    #               ("OpenBLAS", "-O2")], name="q23")
     # search_flags(19)
     # v1 = ("matmul_v1", "-O2")
     # v2 = ("matmul_v2", "-O1")
@@ -98,8 +123,8 @@ if __name__ == "__main__":
     blas = ("OpenBLAS", "-O2")
     # plot_compare_FLOPS(range(128, 1921, 128),
                     #    versions=[v1, v2], name="q11_13")
-    plot_compare_FLOPS(range(128, 4097, 128),
-                       versions=[v4_q19, blas], name="q19")
+    # plot_compare_FLOPS(range(128, 4097, 128),
+    #                    versions=[v4_q19, blas], name="q19")
 
 
 
