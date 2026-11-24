@@ -57,17 +57,18 @@ def search_flags(question, size=1920):
                       f" | {100*blas/avg:.2f}% of OpenBLAS performance", flush=True)
 
 
-def plot_compare_FLOPS(m_sizes, versions, flags="-O3", name="matmul", repeats=3):
+def plot_compare_FLOPS(m_sizes, versions, name="matmul", repeats=3):
+    """versions is a list of (C implementation, compilation flags) pairs."""
     import matplotlib.pyplot as plt
 
     m_sizes = list(m_sizes)
     fig, ax = plt.subplots()
     with TemporaryDirectory() as directory, open(f"{name}.csv", "w", newline="") as data:
         executable = Path(directory) / "matmul"
-        compile_c(executable, flags)
         writer = csv.writer(data)
         writer.writerow(["version", "size", "flags", "time_mean_s", "time_sd_s", "gflops"])
-        for version in versions:
+        for version, flags in versions:
+            compile_c(executable, flags)
             speeds = []
             for size in m_sizes:
                 avg, sd, _ = measure(executable, size, version, repeats)
@@ -75,7 +76,7 @@ def plot_compare_FLOPS(m_sizes, versions, flags="-O3", name="matmul", repeats=3)
                 speeds.append(speed)
                 writer.writerow([version, size, flags, avg, sd, speed])
                 print(f"{version}, N={size}: {avg:.6f} +/- {sd:.6f} s", flush=True)
-            ax.plot(m_sizes, speeds, label=version)
+            ax.plot(m_sizes, speeds, label=f"{version} {flags}".strip())
     ax.set_yscale("log")
     ax.set_xlabel("m_size")
     ax.set_ylabel("GFLOPs")
@@ -85,10 +86,17 @@ def plot_compare_FLOPS(m_sizes, versions, flags="-O3", name="matmul", repeats=3)
 
 
 if __name__ == "__main__":
-    search_flags(question=16, size=1920)
-    # plot_compare_FLOPS(range(128, 4097, 128),
-    #     versions=["matmul_v1", "matmul_v2", "matmul_v3", "OpenBLAS"],
-    #     flags="-O3 -march=native -funroll-loops -ffast-math", name="q17")
+    # Best mean times at N=1920, recorded in notes.md.
+    v1 = ("matmul_v1", "-O2")
+    v2 = ("matmul_v2", "-O1")
+    v3_q15 = ("matmul_v3", "-O2")
+    v3_q17 = ("matmul_v3", "-O3 -march=native -funroll-loops -ffast-math")
+    blas = ("OpenBLAS", "-O2")
+
+    plot_compare_FLOPS(range(128, 1921, 128),
+                       versions=[v1, v2], name="q11_13")
+    plot_compare_FLOPS(range(128, 4097, 128),
+                       versions=[v1, v2, v3_q15, v3_q17, blas], name="q15_17")
 
 
 
