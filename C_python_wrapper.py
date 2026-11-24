@@ -40,12 +40,16 @@ def search_flags(question, size=1920):
         12: ["matmul_v2"],
         14: ["matmul_v3"],
         16: ["matmul_v3"],
+        19: ["matmul_v4"],
     }[question]
     flags = ["", "-O1", "-O2", "-O3"]
     if question == 16:
         extra = ["-march=native", "-funroll-loops", "-ffast-math"]
         flags = [" ".join(("-O3", *combo))
                  for n in range(len(extra)+1) for combo in combinations(extra, n)]
+    if question == 19:
+        extra = ["-march=native", "-funroll-loops", "-ffast-math"]
+        flags.append("-O3 -march=native -funroll-loops -ffast-math")
     with TemporaryDirectory() as directory:
         executable = Path(directory) / "matmul"
         for options in flags:
@@ -83,20 +87,19 @@ def plot_compare_FLOPS(m_sizes, versions, name="matmul", repeats=3):
     ax.legend()
     fig.savefig(f"{name}.png")
     plt.show()
-
+    search_flags()
 
 if __name__ == "__main__":
-    # Best mean times at N=1920, recorded in notes.md.
-    v1 = ("matmul_v1", "-O2")
-    v2 = ("matmul_v2", "-O1")
-    v3_q15 = ("matmul_v3", "-O2")
-    v3_q17 = ("matmul_v3", "-O3 -march=native -funroll-loops -ffast-math")
-    blas = ("OpenBLAS", "-O2")
-
-    plot_compare_FLOPS(range(128, 1921, 128),
-                       versions=[v1, v2], name="q11_13")
-    plot_compare_FLOPS(range(128, 4097, 128),
-                       versions=[v1, v2, v3_q15, v3_q17, blas], name="q15_17")
+    search_flags(19)
+    # v1 = ("matmul_v1", "-O2")
+    # v2 = ("matmul_v2", "-O1")
+    # v3_q15 = ("matmul_v3", "-O2")
+    # v3_q17 = ("matmul_v3", "-O3 -march=native -funroll-loops -ffast-math")
+    # blas = ("OpenBLAS", "-O2")
+    # plot_compare_FLOPS(range(128, 1921, 128),
+                    #    versions=[v1, v2], name="q11_13")
+    # plot_compare_FLOPS(range(128, 4097, 128),
+                    #    versions=[v3_q15, v3_q17, blas], name="q15_17")
 
 
 

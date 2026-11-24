@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <cblas.h>
+#include <tgmath.h>
 
 #include <sys/time.h>
 
@@ -95,6 +96,63 @@ void matmul_v3(const float *A, const float *B, float *C, int M, int N, int K)
 	free(AT);
 }
 
+
+//v3 + manual vectorization through memory aligned SIMD operations 
+//Note, require C11 ISO, not compatible with C99 while auto vectorization is compatible
+
+// Define a memory aligned vector type of 32 Bytes -> 8 float of 4 bytes (32 bits) each
+typedef float vec __attribute__ (( vector_size(32) ));
+
+void matmul_v4(const float *A, const float *B, float *C, int M, int N, int K)
+{
+	if(K % 8 != 0)
+	{
+		printf("Error, mismatch between matrix size and kernel size");
+		exit(EXIT_FAILURE);
+	}
+	
+	//1° Create the vectorized versions of A and B
+	typedef float vec __attribute__((vector_size(32)));
+
+	int n_vectors = K/8;
+	vec *AT_vec = aligned_alloc(sizeof(vec), (size_t)M* n_vectors* sizeof(vec));
+	vec *B_vec = aligned_alloc(sizeof(vec), (size_t)N* n_vectors* sizeof(vec));
+	
+	//2° Fill the vectorized versions
+	for (int i = 0; i<M; i++) {
+		for(int v= 0; v<n_vectors;v++) {
+			for (int lane =0; lane < 8 ; lane++) {
+				int k = 8*v +lane;
+				AT_vec[i*n_vectors+v][lane] = A[i+k*M];
+			}
+		}
+	}
+	for (int j = 0; j<N; j++) {
+		for(int v= 0; v<n_vectors;v++) {
+			for (int lane =0; lane < 8 ; lane++) {
+				int k = 8*v +lane;
+				B_vec[j*n_vectors+v][lane] = B[k + j*K];
+			}
+		}
+	}
+	//3° Do the i,j,k loops with the vectorized accumulate loop over k and fill the corresponding cell of C
+	for (int j=0;j<N;j++){
+		for ( int i=0;i<M;i++){
+			vec acc = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+			for(int v=0;v<n_vectors;v++){
+				acc+= AT_vec[v+i*n_vectors]*B_vec[v+j*n_vectors];
+			}
+			int sum = 0;
+			for(int l=0;l<8;l++){
+				sum+=acc[l];
+			}
+			C[i+j*M] = sum;
+		}
+	}
+}	
+
+
+
 int main(int argc, char *argv[])
 {
 	size_t i;
@@ -112,6 +170,7 @@ int main(int argc, char *argv[])
 		if (strcmp(argv[2], "matmul_v2") == 0) matmul = matmul_v2;
 		else if (strcmp(argv[2], "matmul_v3") == 0) matmul = matmul_v3;
 		else if (strcmp(argv[2], "OpenBLAS") == 0) matmul = matmul_blas;
+		else if (strcmp(argv[2], "matmul_v4") ==0) matmul = matmul_v4;
 		else if (strcmp(argv[2], "matmul_v1") != 0) {
 			fprintf(stderr, "Unknown implementation: %s\n", argv[2]);
 			return EXIT_FAILURE;

@@ -41,46 +41,6 @@ void create_matrices(float** A, float** B, float** C, float** C_blas, int M, int
 }
 
 
-//v3 + manual vectorization through memory aligned SIMD operations 
-//Note, require C11 ISO, not compatible with C99 while auto vectorization is compatible
-
-// Define a memory aligned vector type of 32 Bytes -> 8 float of 4 bytes (32 bits) each
-typedef float vec __attribute__ (( vector_size(32) ));
-
-void matmul_v4(const float *A, const float *B, float *C, int M, int N, int K)
-{
-	if(K % 8 != 0)
-	{
-		printf("Error, mismatch between matrix size and kernel size");
-		exit(EXIT_FAILURE);
-	}
-	
-	// Some vector creation and usage exemples
-	// Dynamically allocate a space in memory composed of X elements using the size of one element as alignement
-	// vec *a = (vec*) aligned_alloc(sizeof(vec),X*sizeof(vec));  
-	
-	// Allocate and initialize a vector to a constant value
-	// vec acc = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
-	
-	// Fill a vector through indexing in a loop
-	// for (i = 0; i < 8; i++)
-	//     v[i] = i;
-	
-	// Access element i of a vectorized version of the matrix A
-	// a[i/8][i%8] = A[i];
-	
-	
-	
-	//1° Create the vectorized versions of A and B
-	
-	//2° Fill the vectorized versions
-	
-	//3° Do the i,j,k loops with the vectorized accumulate loop over k and fill the corresponding cell of C
-	
-}
-
-
-
 //Matmul using FMA operation on a sub-part of C and optimizing the cache usage
 //No need for transposition in this version as most of the work is done in cache anyway
 
