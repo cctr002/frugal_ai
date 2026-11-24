@@ -6,7 +6,7 @@ from itertools import combinations
 from pathlib import Path
 from statistics import mean, stdev
 from tempfile import TemporaryDirectory
-
+import time 
 ROOT = Path(__file__).resolve().parent
 ENV = {**os.environ, "OMP_NUM_THREADS": "1", "OPENBLAS_NUM_THREADS": "1"}
 
@@ -58,7 +58,7 @@ def search_flags(question, size=1920):
             for version in versions:
                 avg, sd, blas = measure(executable, size, version)
                 print(f"{version}: {avg:.6f} +/- {sd:.6f} s (sample SD, 3 runs)"
-                      f" | {100*blas/avg:.2f}% of OpenBLAS performance", flush=True)
+                        f" | {100*blas/avg:.2f}% of OpenBLAS performance", flush=True)
 
 
 def plot_compare_FLOPS(m_sizes, versions, name="matmul", repeats=3):
@@ -87,19 +87,19 @@ def plot_compare_FLOPS(m_sizes, versions, name="matmul", repeats=3):
     ax.legend()
     fig.savefig(f"{name}.png")
     plt.show()
-    search_flags()
 
 if __name__ == "__main__":
-    search_flags(19)
+    # search_flags(19)
     # v1 = ("matmul_v1", "-O2")
     # v2 = ("matmul_v2", "-O1")
     # v3_q15 = ("matmul_v3", "-O2")
     # v3_q17 = ("matmul_v3", "-O3 -march=native -funroll-loops -ffast-math")
-    # blas = ("OpenBLAS", "-O2")
+    v4_q19 = ("matmul_v4", "-O3 -march=native -funroll-loops -ffast-math")
+    blas = ("OpenBLAS", "-O2")
     # plot_compare_FLOPS(range(128, 1921, 128),
                     #    versions=[v1, v2], name="q11_13")
-    # plot_compare_FLOPS(range(128, 4097, 128),
-                    #    versions=[v3_q15, v3_q17, blas], name="q15_17")
+    plot_compare_FLOPS(range(128, 4097, 128),
+                       versions=[v4_q19, blas], name="q19")
 
 
 

@@ -142,13 +142,15 @@ void matmul_v4(const float *A, const float *B, float *C, int M, int N, int K)
 			for(int v=0;v<n_vectors;v++){
 				acc+= AT_vec[v+i*n_vectors]*B_vec[v+j*n_vectors];
 			}
-			int sum = 0;
+			float sum = 0.0f;
 			for(int l=0;l<8;l++){
 				sum+=acc[l];
 			}
 			C[i+j*M] = sum;
 		}
 	}
+	free(AT_vec);
+	free(B_vec);
 }	
 
 
