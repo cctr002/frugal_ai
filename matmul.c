@@ -184,15 +184,13 @@ void kernel(const float *_a, const float *_b, float *_c,
 
 			// Broadcast the b[k] value into a beta vector
 			val = _b[k + (j+b_n)*K];
-			vec beta;
-			for (l = 0; l < 8; l++) beta[l] = val;
+			vec beta = {val, val, val, val, val, val, val, val};
 
 			// 1.2 Loop over the vectors in A (ker_h/8)
 			for (b_m = 0; b_m < ker_h/8; b_m++) {
 				// Fill an alpha vector with the content of the current vector of A
 				vec alpha;
-				for (l = 0; l < 8; l++)
-					alpha[l] = _a[i + 8*b_m + l + k*M];
+				memcpy(&alpha, _a + i + 8*b_m + k*M, sizeof(alpha));
 				// Accumulate alpha * beta into the current vector cell of t[][]. Doing so with vectors will implicitely call an FMA operation.
 				t[b_m][b_n] += alpha * beta;
 			}
