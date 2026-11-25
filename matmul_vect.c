@@ -127,23 +127,47 @@ void matmul_v5(const float *A, const float *B, float *C, int M, int N, int K)
 //V4 but with blocking decomposition to successively load sub parts of A and B
 //into L2 and L1 cache for maximum reuse. Maximizing the achievable memory bandwith
 
+#ifndef BLOCK_M
+#define BLOCK_M 64
+#endif
+#ifndef BLOCK_N
+#define BLOCK_N 120
+#endif
+#ifndef BLOCK_K
+#define BLOCK_K 240
+#endif
+
 void matmul_v6(const float *A, const float *B, float *C, int M, int N, int K)
 {
 	int i,j,k;
 
 	// Set the size of the blocks and order them by importance into the different cache levels
 	// Keep in mind that we want l3 < l2 < l1 and ensure that each dimension is a multiple of the corresponding kernel size
-	const int l3 = 64; //Number of rows from A
-	const int l2 = 120; //Number of columns from B
-	const int l1 = 240; //Number of columns from A
+	const int l3 = BLOCK_M; //Number of rows from A
+	const int l2 = BLOCK_N; //Number of columns from B
+	const int l1 = BLOCK_K; //Number of columns from A
 
-	if(M % ker_h != 0 || N % ker_w != 0 || l2 % ker_w != 0 || l3 % ker_h != 0)
+	if(l3 <= 0 || l2 <= 0 || l1 <= 0 || M % ker_h != 0 || N % ker_w != 0 || l2 % ker_w != 0 || l3 % ker_h != 0)
 	{
 		printf("Error, mismatch between matrix size and kernel size");
 		exit(EXIT_FAILURE);
 	}
 
 	//5-nested loop version that goes through the blocks in cache and then call the kernel on the sub regions in the current block
+	for (size_t cell = 0; cell < (size_t)M*N; cell++) C[cell] = 0.0f;
+	for (i = 0; i < M; i += l3) {
+		int i_stop = i+l3 < M ? i+l3 : M;
+		for (j = 0; j < N; j += l2) {
+			int j_stop = j+l2 < N ? j+l2 : N;
+			for (k = 0; k < K; k += l1) {
+				int k_stop = k+l1 < K ? k+l1 : K;
+				for (int ii = i; ii < i_stop; ii += ker_h)
+					for (int jj = j; jj < j_stop; jj += ker_w)
+						kernel(A, B, C, M, N, K, ii, jj, k, k_stop);
+			}
+		}
+	}
+
 }
 
 
@@ -171,7 +195,7 @@ int main(int argc, char *argv[])
 
 	init_timing(&timer);
 
-	matmul_v5(A,B,C,M,N,K); //your custom matmul implementation
+	matmul_v6(A,B,C,M,N,K); //your custom matmul implementation
 
 	printf("Custom sgemm time: %f s\n", elapsed_time(timer));
 
