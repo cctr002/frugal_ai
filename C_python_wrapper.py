@@ -137,8 +137,9 @@ def plot_compare_FLOPS(m_sizes, versions, name="matmul", repeats=3):
     plt.show()
 
 if __name__ == "__main__":
+    # Q24: test_kernel_sizes()
     # Q25 -> Q26 -> Q27, in order.
-    search_flags(25)
+    # search_flags(25)
     best_flags = "-O3 -march=native -funroll-loops -ffast-math"
     height, width = 16, 6
     bm, bn, bk = search_blocks(height=height, width=width, flags=best_flags)
@@ -148,7 +149,6 @@ if __name__ == "__main__":
         versions=[("matmul_v4", best_flags), ("matmul_v5", best_flags),
                   ("matmul_v6", v6_flags), ("OpenBLAS", "-O2")], name="q27")
     # search_flags(22)
-    # Q24: test_kernel_sizes()
     # Q23: replace these flags with the best configuration measured in Q22.
     # best_flags = "-O3 -march=native -funroll-loops -ffast-math"
     # plot_compare_FLOPS(range(48, 3841, 48),
@@ -159,8 +159,8 @@ if __name__ == "__main__":
     # v2 = ("matmul_v2", "-O1")
     # v3_q15 = ("matmul_v3", "-O2")
     # v3_q17 = ("matmul_v3", "-O3 -march=native -funroll-loops -ffast-math")
-    v4_q19 = ("matmul_v4", "-O3 -march=native -funroll-loops -ffast-math")
-    blas = ("OpenBLAS", "-O2")
+    # v4_q19 = ("matmul_v4", "-O3 -march=native -funroll-loops -ffast-math")
+    # blas = ("OpenBLAS", "-O2")
     # plot_compare_FLOPS(range(128, 1921, 128),
                     #    versions=[v1, v2], name="q11_13")
     # plot_compare_FLOPS(range(128, 4097, 128),

@@ -1,4 +1,19 @@
-### 1
+
+
+Q22 | size=1920 | no flags
+matmul_v5: 10.578611 +/- 0.007924 s (sample SD, 3 runs) | 0.97% of OpenBLAS performance
+
+Q22 | size=1920 | -O1
+matmul_v5: 3.608332 +/- 0.028635 s (sample SD, 3 runs) | 2.75% of OpenBLAS performance
+
+Q22 | size=1920 | -O2
+matmul_v5: 5.219263 +/- 0.013610 s (sample SD, 3 runs) | 1.89% of OpenBLAS performance
+
+Q22 | size=1920 | -O3
+matmul_v5: 4.758115 +/- 0.066947 s (sample SD, 3 runs) | 2.10% of OpenBLAS performance
+
+Q22 | size=1920 | -O3 -march=native -funroll-loops -ffast-math
+matmul_v5: 0.249389 +/- 0.025036 s (sample SD, 3 runs) | 40.73% of OpenBLAS performance### 1
 Architecture :                            x86_64
 Mode(s) opératoire(s) des processeurs :   32-bit, 64-bit
 Tailles des adresses:                     46 bits physical, 48 bits virtual
@@ -201,3 +216,48 @@ matmul_v4: 1.723084 +/- 0.036393 s (sample SD, 3 runs) | 5.87% of OpenBLAS perfo
 
 Q19 | size=1920 | -O3 -march=native -funroll-loops -ffast-math
 matmul_v4: 0.473009 +/- 0.026676 s (sample SD, 3 runs) | 21.43% of OpenBLAS performance
+
+Q22 | size=1920 | no flags
+matmul_v5: 10.578611 +/- 0.007924 s (sample SD, 3 runs) | 0.97% of OpenBLAS performance
+
+Q22 | size=1920 | -O1
+matmul_v5: 3.608332 +/- 0.028635 s (sample SD, 3 runs) | 2.75% of OpenBLAS performance
+
+Q22 | size=1920 | -O2
+matmul_v5: 5.219263 +/- 0.013610 s (sample SD, 3 runs) | 1.89% of OpenBLAS performance
+
+Q22 | size=1920 | -O3
+matmul_v5: 4.758115 +/- 0.066947 s (sample SD, 3 runs) | 2.10% of OpenBLAS performance
+
+Q22 | size=1920 | -O3 -march=native -funroll-loops -ffast-math
+matmul_v5: 0.249389 +/- 0.025036 s (sample SD, 3 runs) | 40.73% of OpenBLAS performance
+
+Q24
+Kernel 8x6: 6 vector accumulators
+N=240: 0.000551 +/- 0.000193 s | 115.54% of OpenBLAS performance
+N=1920: 0.310365 +/- 0.017137 s | 32.79% of OpenBLAS performance
+
+Kernel 16x6: 12 vector accumulators
+N=240: 0.000527 +/- 0.000226 s | 117.45% of OpenBLAS performance
+N=1920: 0.241657 +/- 0.030667 s | 43.37% of OpenBLAS performance
+
+Kernel 16x8: 16 vector accumulators
+N=240: 0.000605 +/- 0.000214 s | 112.94% of OpenBLAS performance
+N=1920: 0.250783 +/- 0.026412 s | 41.24% of OpenBLAS performance
+
+Q25 | size=1920 | -O3 -march=native -funroll-loops -ffast-math
+matmul_v4: 0.465589 +/- 0.048179 s (sample SD, 3 runs) | 21.86% of OpenBLAS performance
+matmul_v5: 0.227894 +/- 0.028106 s (sample SD, 3 runs) | 44.99% of OpenBLAS performance
+matmul_v6: 0.135524 +/- 0.007967 s (sample SD, 3 runs) | 74.89% of OpenBLAS performance
+
+Q26 | blocks=32,60,120 | 0.144770 +/- 0.007762 s | 71.47% of OpenBLAS performance
+Q26 | blocks=32,60,240 | 0.146265 +/- 0.001249 s | 70.16% of OpenBLAS performance
+Q26 | blocks=32,60,480 | 0.140317 +/- 0.002994 s | 72.93% of OpenBLAS performance
+Q26 | blocks=32,120,240 | 0.141768 +/- 0.002858 s | 72.68% of OpenBLAS performance
+Q26 | blocks=32,120,480 | 0.136894 +/- 0.004808 s | 74.95% of OpenBLAS performance
+Q26 | blocks=32,240,480 | 0.140979 +/- 0.003813 s | 72.69% of OpenBLAS performance
+Q26 | blocks=64,120,240 | 0.134863 +/- 0.004309 s | 75.92% of OpenBLAS performance
+Q26 | blocks=64,120,480 | 0.133425 +/- 0.004946 s | 77.04% of OpenBLAS performance
+Q26 | blocks=64,240,480 | 0.140304 +/- 0.007788 s | 73.22% of OpenBLAS performance
+Q26 | blocks=128,240,480 | 0.137659 +/- 0.008260 s | 74.12% of OpenBLAS performance
+Best blocks: (64, 120, 480), mean time 0.133425 s

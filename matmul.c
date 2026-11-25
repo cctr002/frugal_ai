@@ -257,19 +257,22 @@ void matmul_v6(const float *A, const float *B, float *C, int M, int N, int K)
 
 	//5-nested loop version that goes through the blocks in cache and then call the kernel on the sub regions in the current block
 	for (size_t cell = 0; cell < (size_t)M*N; cell++) C[cell] = 0.0f;
-	for (i = 0; i < M; i += l3) {
-		int i_stop = i+l3 < M ? i+l3 : M;
-		for (j = 0; j < N; j += l2) {
-			int j_stop = j+l2 < N ? j+l2 : N;
-			for (k = 0; k < K; k += l1) {
-				int k_stop = k+l1 < K ? k+l1 : K;
-				for (int ii = i; ii < i_stop; ii += ker_h)
-					for (int jj = j; jj < j_stop; jj += ker_w)
-						kernel(A, B, C, M, N, K, ii, jj, k, k_stop);
+	#pragma omp parallel shared(...) private(i,j,k,ii,jj)
+	{
+		#pragma omp for schedule(TYPE,N)
+		for (i = 0; i < M; i += l3) {
+			int i_stop = i+l3 < M ? i+l3 : M;
+			for (j = 0; j < N; j += l2) {
+				int j_stop = j+l2 < N ? j+l2 : N;
+				for (k = 0; k < K; k += l1) {
+					int k_stop = k+l1 < K ? k+l1 : K;
+					for (int ii = i; ii < i_stop; ii += ker_h)
+						for (int jj = j; jj < j_stop; jj += ker_w)
+							kernel(A, B, C, M, N, K, ii, jj, k, k_stop);
+				}
 			}
 		}
-	}
-
+	}	
 }
 
 
