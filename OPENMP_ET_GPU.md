@@ -19,6 +19,18 @@ Pour chaque bloc de lignes i0 et de colonnes j0 :
 
 ## 2. OpenMP — distribuer les blocs de v6 sur le CPU
 
+Le script [openmp_bench.py](openmp_bench.py) exécute Q28 à Q33 en ordre sur Linux. Passer les blocs retenus en Q26 avec `--blocks BM BN BK`. Les valeurs ci-dessous sont celles du code de départ.
+
+```bash
+python openmp_bench.py --blocks 64 120 240
+```
+
+Les temps, la configuration retenue et les graphes sont enregistrés dans `openmp_results/`. Le script compte `2N³` opérations par produit. Pour comparer ses débits aux anciens graphes du wrapper, ramener les deux séries à la même convention. Pour Q34, relever la puissance avec les réglages et nombres de threads indiqués dans `q30_q32.csv`. Saisir les relevés dans un CSV avec les colonnes `threads,watts`, puis calculer l’efficacité à partir des temps déjà enregistrés.
+
+```bash
+python openmp_bench.py --power-csv watts.csv
+```
+
 Une directive `#pragma omp parallel for` demande au compilateur de créer une région parallèle et de répartir les itérations de la boucle suivante entre les threads. Avec GCC, compiler **et lier** avec `-fopenmp`. Un thread OpenMP est une unité d’exécution logicielle que le système place sur un processeur logique. Les notes du TP indiquent **12 cœurs physiques et 20 processeurs logiques** sur l’i7-12700 de la salle, avec des P-cores et des E-cores. Un nombre de threads identique ne garantit pas un placement ni une puissance de calcul identiques.
 
 ### Q28 — comparer la boucle M et la boucle N avec deux threads

@@ -239,10 +239,12 @@ void matmul_v5(const float *A, const float *B, float *C, int M, int N, int K)
 #define BLOCK_K 240
 #endif
 
+#ifndef V6_OMP_AXIS_N
+#define V6_OMP_AXIS_N 0
+#endif
+
 void matmul_v6(const float *A, const float *B, float *C, int M, int N, int K)
 {
-	int i,j,k;
-
 	// Set the size of the blocks and order them by importance into the different cache levels
 	// Keep in mind that we want l3 < l2 < l1 and ensure that each dimension is a multiple of the corresponding kernel size
 	const int l3 = BLOCK_M; //Number of rows from A
@@ -257,22 +259,31 @@ void matmul_v6(const float *A, const float *B, float *C, int M, int N, int K)
 
 	//5-nested loop version that goes through the blocks in cache and then call the kernel on the sub regions in the current block
 	for (size_t cell = 0; cell < (size_t)M*N; cell++) C[cell] = 0.0f;
-	#pragma omp parallel shared(...) private(i,j,k,ii,jj)
-	{
-		#pragma omp for schedule(TYPE,N)
-		for (i = 0; i < M; i += l3) {
+	// Q28: assign disjoint row bands (default) or column bands to threads.
+	const int by_columns = V6_OMP_AXIS_N;
+	const int outer_size = by_columns ? N : M;
+	const int inner_size = by_columns ? M : N;
+	const int outer_step = by_columns ? l2 : l3;
+	const int inner_step = by_columns ? l3 : l2;
+#ifdef _OPENMP
+	#pragma omp parallel for schedule(runtime) default(none) shared(A, B, C, M, N, K, l3, l2, l1, by_columns, outer_size, inner_size, outer_step, inner_step)
+#endif
+	for (int outer = 0; outer < outer_size; outer += outer_step) {
+		for (int inner = 0; inner < inner_size; inner += inner_step) {
+			int i = by_columns ? inner : outer;
+			int j = by_columns ? outer : inner;
 			int i_stop = i+l3 < M ? i+l3 : M;
-			for (j = 0; j < N; j += l2) {
-				int j_stop = j+l2 < N ? j+l2 : N;
-				for (k = 0; k < K; k += l1) {
-					int k_stop = k+l1 < K ? k+l1 : K;
-					for (int ii = i; ii < i_stop; ii += ker_h)
-						for (int jj = j; jj < j_stop; jj += ker_w)
-							kernel(A, B, C, M, N, K, ii, jj, k, k_stop);
-				}
+			int j_stop = j+l2 < N ? j+l2 : N;
+			// Keep all K slices of a tile on the same thread.
+			for (int k = 0; k < K; k += l1) {
+				int k_stop = k+l1 < K ? k+l1 : K;
+				for (int ii = i; ii < i_stop; ii += ker_h)
+					for (int jj = j; jj < j_stop; jj += ker_w)
+						kernel(A, B, C, M, N, K, ii, jj, k, k_stop);
 			}
 		}
-	}	
+	}
+
 }
 
 

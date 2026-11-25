@@ -18,12 +18,13 @@ def compile_c(executable, flags):
     )
 
 
-def measure(executable, size, version, repeats=3):
+def measure(executable, size, version, repeats=3, env=None):
     """Return custom mean, sample standard deviation, and OpenBLAS mean (seconds)."""
     times, blas_times = [], []
     for _ in range(repeats):
         output = subprocess.check_output(
-            [str(executable), str(size), version], cwd=ROOT, env=ENV, text=True,
+            [str(executable), str(size), version], cwd=ROOT,
+            env=ENV if env is None else env, text=True,
         )
         blas_time, custom_time = [float(line.split()[-2]) for line in output.splitlines()]
         if min(blas_time, custom_time) <= 0:
