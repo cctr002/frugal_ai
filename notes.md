@@ -261,3 +261,27 @@ Q26 | blocks=64,120,480 | 0.133425 +/- 0.004946 s | 77.04% of OpenBLAS performan
 Q26 | blocks=64,240,480 | 0.140304 +/- 0.007788 s | 73.22% of OpenBLAS performance
 Q26 | blocks=128,240,480 | 0.137659 +/- 0.008260 s | 74.12% of OpenBLAS performance
 Best blocks: (64, 120, 480), mean time 0.133425 s
+Q28 | M | static     | 0.076644 ± 0.006776 s
+Q28 | N | static     | 0.069857 ± 0.003503 s
+Q29 | N | static     | 0.073184 ± 0.005650 s
+Q29 | N | static,1   | 0.070264 ± 0.002741 s
+Q29 | N | static,2   | 0.071017 ± 0.002460 s
+Q29 | N | static,4   | 0.068029 ± 0.000424 s
+Q29 | N | dynamic,1  | 0.070609 ± 0.004770 s
+Q29 | N | dynamic,2  | 0.075063 ± 0.001049 s
+Q29 | N | dynamic,4  | 0.068684 ± 0.000634 s
+Q29 | N | guided,1   | 0.070301 ± 0.001551 s
+Q29 | N | guided,2   | 0.074795 ± 0.008931 s
+Q29 | N | guided,4   | 0.080252 ± 0.006676 s
+Q30 | axis=N, schedule=static,4, blocks=[64, 120, 240]
+   1 threads | 0.135453 ± 0.007376 s | 104.51 GFLOP/s
+   2 threads | 0.069027 ± 0.001829 s | 205.08 GFLOP/s
+   4 threads | 0.046977 ± 0.005695 s | 301.34 GFLOP/s
+   8 threads | 0.040691 ± 0.007244 s | 347.88 GFLOP/s
+  12 threads | 0.043680 ± 0.007013 s | 324.08 GFLOP/s
+  16 threads | 0.042521 ± 0.005078 s | 332.92 GFLOP/s
+  20 threads | 0.040546 ± 0.004208 s | 349.13 GFLOP/s
+  24 threads | 0.039243 ± 0.002465 s | 360.72 GFLOP/s
+Q31 | without OpenMP 0.139329 ± 0.007278 s | OpenMP 1 thread 0.135453 ± 0.007376 s
+Q33 | E(12) / E(1), assuming twice the power | v6=0.645 | OpenBLAS=0.647
+Q34 | Supply wattmeter readings with --power-csv (columns: threads,watts).
