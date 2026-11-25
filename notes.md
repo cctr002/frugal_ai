@@ -285,3 +285,15 @@ Q30 | axis=N, schedule=static,4, blocks=[64, 120, 240]
 Q31 | without OpenMP 0.139329 ± 0.007278 s | OpenMP 1 thread 0.135453 ± 0.007376 s
 Q33 | E(12) / E(1), assuming twice the power | v6=0.645 | OpenBLAS=0.647
 Q34 | Supply wattmeter readings with --power-csv (columns: threads,watts).
+
+
+gcc matmul.c -O3 -march=native -funroll-loops -ffast-math -fopenmp \
+  -DV6_OMP_AXIS_N=0 -DBLOCK_M=64 -DBLOCK_N=120 -DBLOCK_K=480 \
+  -o matmul_omp -lopenblas -lm
+
+
+t=8
+N=1920
+
+OMP_NUM_THREADS="$t" OMP_DYNAMIC=FALSE OMP_SCHEDULE=static,1 \
+OPENBLAS_NUM_THREADS=1 ./matmul_omp "$N" matmul_v6
