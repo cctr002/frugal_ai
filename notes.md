@@ -292,8 +292,17 @@ gcc matmul.c -O3 -march=native -funroll-loops -ffast-math -fopenmp \
   -o matmul_omp -lopenblas -lm
 
 
-t=8
-N=1920
+t=2
+N=9600
 
 OMP_NUM_THREADS="$t" OMP_DYNAMIC=FALSE OMP_SCHEDULE=static,1 \
-OPENBLAS_NUM_THREADS=1 ./matmul_omp "$N" matmul_v6
+OPENBLAS_NUM_THREADS=20 ./matmul_omp "$N" matmul_v6
+repos 20 W
+t=1 63w
+t=2 86W
+t=4 136W
+t=8 171W
+t=12 170W
+t=16 162 w
+t=20 157 W
+t=24 166W
