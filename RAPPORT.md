@@ -77,7 +77,7 @@ Temps moyens à **N = 1 920**, en secondes. La dernière colonne utilise `-O3 -m
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
 | Puissance (W) | 63 | 86 | 136 | 171 | 170 | 162 | 157 | 166 |
 
-La puissance atteint son maximum mesuré à 8 threads. Le meilleur débit par watt peut se trouver ailleurs. Il manque les **temps de v6 à 9 600** et la confirmation que les puissances ont été lues pendant v6. Le binaire utilisé dans les notes exécute aussi OpenBLAS. Le test en fin de rapport isole v6 pour lever cette ambiguïté.
+La puissance atteint son maximum mesuré à 8 threads. Le meilleur débit par watt peut se trouver ailleurs. Il manque les **temps de v6 à 9 600** et la confirmation que les puissances ont été lues pendant v6. Le binaire utilisé dans les notes exécute aussi OpenBLAS. Le test en fin de rapport chronomètre v6 seule à 9 600. Le calcul d’efficacité suppose que les watts stabilisés déjà relevés correspondent à cette phase.
 
 ### Q35–40 · CPU contre T4
 
@@ -105,6 +105,6 @@ Sur T4, la config 4 tient le budget de temps. À partir de l’itération 250, l
 
 ## Mesures restant à intégrer
 
-- **Q9 et Q34, sur le poste de la salle.** Depuis la racine du dépôt, lancer `bash mesures_rapport.sh`. Pendant la charge v6 à 9 600, relever la puissance affichée pour chaque nombre de threads. Le script donne le meilleur débit par watt à la prise et enregistre aussi le débit rapporté au surcroît de puissance par rapport au repos.
+- **Q9 et Q34, sur le poste de la salle.** Depuis la racine du dépôt, lancer `bash mesures_rapport.sh`. La campagne a un budget de 45 min. Chaque point v6 est limité à 3 min. Le script réutilise les huit puissances stabilisées du tableau Q34 et les 20 W au repos. Il tourne sans intervention. Le script donne le meilleur débit par watt à la prise et enregistre aussi le débit rapporté au surcroît de puissance par rapport au repos.
 - **Q35–40.** Placer le fichier téléchargé depuis le notebook T4 dans `gpu_results/gpu.csv`, puis lancer `python gpu_bench.py report --cpu-watts 180 --gpu-watts 70`. Cette commande exploite le CSV CPU existant et génère les deux graphiques.
 - **CNN.** Reporter les résultats du checkpoint retenu et joindre ses poids `.dat` avec le notebook. Le temps mural des configurations 1 à 4 manque dans les logs. La config 5 le consigne dans `training.csv`.
