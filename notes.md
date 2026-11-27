@@ -6780,3 +6780,23 @@ Fwd :   450 [##############################]   16 /   16 | B.Loss: 0.00000e+00 |
               Average forward perf.: 8290.12 it/s 
 2 048 images : [243.7 248.  244.  244.9 248. ] ms | médiane : 244.9 ms | budget < 300 ms : True
 Accuracy : 95.56 %
+
+
+Model Name or ref.	Participants (or team)	Error rate (%)	Compute time (ms)	Nb. parameters	Inspiration references if any
+"Ref. modififed Le-NET5
+In 32x32, FP32 inference"	Teaching team	19,43	80	1085808	http://vision.stanford.edu/cs598_spring07/papers/Lecun98.pdf
+Corr Arch @128	Teaching team	2,25	286	321536	
+Corr Arch @128 (from 256 with crop)	Teaching team	1,95	286	321536	
+Arch Heavy @256	Teaching team	1,61	645	393330	(out of competition / too slow)
+	Martins	8.64	353	133507	v11, run on T4, 2000 cycles, inspired by layer of MobileNETv1
+	Mila	5,52	247,05	2139141	google colab T4, nb_cycles = 3 + add filters
+	Nathan	11,43	258	1366539	google colab T4, 3 layers, 600 epoch
+	Hugo	7,13	300	231821	
+	Nathan	11,62	220		google colab T4, 3 layers, 600 epoch (without first conv)
+	Julie and Emma	11,33	196	4244485	Google Colab T4, 500 epoch, added one conv layer, reduced filter size
+	Eitan + Elodie	7,66	187,79	1366085	600 Epoch, 3 convo layers. T4, LR  min decrease
+	Asal	16,11	224	568597	google colab T4, 3 conv layers, 200 epoch
+	Gabriel	5,66	291	1086923	google colab T4, 3 double conv with norm, 200 epoch
+	Yuxin	6,01	151	809316	google colab T4, 6 conv 3x3 (VGG-like), 64 px, affine augmentation, FP16, batch 256, 1000 iter
+	Laetitia	10,74	214	560133	google colab T4
+	Nicholas	14,35	735	133514	CPU
