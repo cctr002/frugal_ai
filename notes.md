@@ -3777,3 +3777,1004 @@ Fwd :   500 [##############################]   16 /   16 | B.Loss: 0.00000e+00 |
 2 048 images : [155.7 154.4 155.9 154.5 153.2] ms | médiane : 154.5 ms | budget < 300 ms : True
 Accuracy : 50.00 %
 
+### training 5 
+#### config
+import torch
+import csv
+from pathlib import Path
+from tempfile import mkdtemp
+
+raw_image_size = 128
+image_size = 96
+eval_batch = 128
+precision = "FP16C_FP32A"
+# Config 5 : seul le calcul d'entraînement passe en FP32. L'inférence reste en FP16/FP32.
+train_precision = "FP32C_FP32A"
+val_transform = A.Compose([A.Resize(image_size, image_size, interpolation=1)])
+
+def build_model():
+  relu = cnn.relu(leaking=0.05, saturation=64.0)
+  cnn.input(spatial_shape=[image_size, image_size, 1], nb_features=3)
+  cnn.conv(f_size=(4,4), stride=(2,2), padding=(1,1), nb_filters=24, activation=relu)
+  for width in (48, 96):
+    cnn.pool(p_size=(2,2), p_type="MAX")
+    for _ in range(2):
+      cnn.conv(f_size=(3,3), padding=(1,1), nb_filters=width, activation=relu)
+  cnn.pool(p_size=(2,2), p_type="MAX")
+  cnn.conv(f_size=(3,3), padding=(1,1), nb_filters=128, activation=relu)
+  cnn.conv(f_size=(1,1), nb_filters=2, activation="LIN")
+  cnn.pool(p_size=(1,1), p_global=1, p_type="AVG", activation="SMAX")
+
+def check_budget():
+  cnn.init(b_size=eval_batch, inference_only=1, dynamic_load=1,
+           comp_meth="C_CUDA", mixed_precision=precision)
+  try:
+    build_model()
+    data_prep(0, raw_image_size, image_size, test_mode=1)
+    x, y = create_validation_set(val_transform)
+    cnn.create_dataset("TEST", len(y), x, y)
+    cnn.forward(drop_mode="AVG_MODEL", no_error=1, saving=0, return_output=0)
+    torch.cuda.synchronize()
+    times = []
+    for _ in range(5):
+      start = time.perf_counter()
+      cnn.forward(drop_mode="AVG_MODEL", no_error=1, saving=0, return_output=0)
+      torch.cuda.synchronize()
+      times.append(1000 * (time.perf_counter() - start))
+    median = float(np.median(times))
+    print(f"Batch {eval_batch}, 2 048 images : {np.round(times, 1)} ms ; médiane {median:.1f} ms")
+    return median
+  finally:
+    free_data_helper()
+
+latency_ms = check_budget()
+
+if latency_ms >= 300:
+  raise RuntimeError("Budget dépassé. Ajuster eval_batch et relancer la cellule de chronométrage.")
+nb_images_per_iter = 2048
+load_iter = 0
+train_transform = A.Compose([
+  A.Resize(image_size, image_size, interpolation=1),
+  A.ColorJitter(brightness=(0.85,1.15), contrast=(0.85,1.15), saturation=(0.85,1.15), hue=0.05, p=0.8),
+  A.ToGray(p=0.02), A.HorizontalFlip(p=0.5),
+  A.Affine(scale=(0.9,1.1), rotate=(-10,10), interpolation=1, p=0.3),
+])
+
+#This funtion allow to launch data augmentation on a separate thread.
+#This way we can train on the GPU and generate new agumented examples in parallel.
+def data_augm():
+  input_data, targets = create_augmented_batch(train_transform)
+  cnn.delete_dataset("TRAIN_buf", silent=1)
+  cnn.create_dataset("TRAIN_buf", nb_images_per_iter, input_data[:,:], targets[:,:], silent=1)
+  return
+
+cnn.init(b_size=32, optimizer=cnn.rms_prop(momentum=0.9), wema=0, dynamic_load=1,
+  comp_meth='C_CUDA', mixed_precision=train_precision)
+build_model()
+
+data_prep(nb_images_per_iter, raw_image_size, image_size)
+
+input_val, targets_val = create_validation_set(val_transform)
+cnn.create_dataset("VALID", 2048, input_val, targets_val)
+# forward() lit TEST ; les deux noms utilisent le même split officiel du TP.
+cnn.create_dataset("TEST", 2048, input_val, targets_val)
+
+
+#Create fist augmentation before parallelization
+input_data, targets = create_augmented_batch(train_transform)
+cnn.create_dataset("TRAIN", nb_images_per_iter, input_data[:,:], targets[:,:])
+
+warmup = 10
+cycle_length = 500
+nb_cycles = 1
+#Cycle length and/or the number of cycle should be increased with the complexity of the network and task
+
+l_r_max = 3e-4
+l_r_min = 3e-6
+
+#In case the creation of new augmented data is too long compared to training, you can
+#increase the number of training iteration over a single augmentation
+nb_iter_per_augm = 1
+if(nb_iter_per_augm > 1):
+  shuffle_frequency = 1
+else:
+  shuffle_frequency = 0
+
+
+run_dir = Path(mkdtemp(prefix="config5_t4_", dir="/content"))
+checkpoint = run_dir / "config5_best.dat"
+log_path = run_dir / "training.csv"
+best_accuracy, best_iter = -1.0, 0
+# Durée murale de la boucle, augmentations, validations et sauvegardes incluses.
+torch.cuda.synchronize()
+train_start = time.perf_counter()
+with log_path.open("w", newline="") as log:
+  writer = csv.writer(log)
+  writer.writerow(["iteration", "images_seen", "training_seconds", "validation_accuracy_pct", "best_iteration"])
+  for i in range(load_iter, nb_cycles*cycle_length):
+
+    if((i+1) % nb_iter_per_augm == 0):
+      t = Thread(target=data_augm)
+      t.start()
+
+    if(i < warmup):
+      l_r = l_r_min + (l_r_max - l_r_min) * min(i/warmup,1.0)
+    else: # Cyclical cosin learning rate decay with warm restart
+      cycle_id = i//cycle_length
+      in_cycle_progress = (i%cycle_length)/cycle_length
+      l_r = l_r_min + 0.5*(l_r_max*0.8**cycle_id - l_r_min)*(1 + np.cos(np.pi*in_cycle_progress))
+
+    cnn.train(nb_iter=1, learning_rate=l_r, weight_decay=0.01, decoupled_wdecay=1,
+      confmat=1, control_interv=50, save_every=0, save_optim_every=0, save_bin=1, TC_scale_factor=1.0, shuffle_every=shuffle_frequency)
+
+    if(i == 0):
+      cnn.perf_eval()
+
+    if((i+1) % nb_iter_per_augm == 0):
+      t.join()
+      cnn.swap_data_buffers("TRAIN")
+    if (i + 1) % 50 == 0:
+      preds = cnn.forward(drop_mode="AVG_MODEL", no_error=1, saving=0, return_output=1)
+      accuracy = float(np.mean(preds[:, :2].argmax(1) == targets_val.argmax(1)))
+      if accuracy > best_accuracy:
+        best_accuracy, best_iter = accuracy, i + 1
+        cnn.save(str(checkpoint), bin=1)
+      torch.cuda.synchronize()
+      elapsed = time.perf_counter() - train_start
+      writer.writerow([i + 1, (i + 1) * nb_images_per_iter, round(elapsed, 2),
+                       round(100 * accuracy, 4), best_iter])
+      log.flush()
+      print(f"Iter {i+1} | {elapsed/60:.2f} min | accuracy {accuracy:.2%} | meilleur checkpoint {best_iter}", flush=True)
+print(f"Temps total d’entraînement : {elapsed/60:.2f} min. Log : {log_path}")
+free_data_helper()
+#### training log
+Network (id: 0) initialized with : 
+Batch size: 128 
+Using CUDA (FP16C_FP32A) compute method 
+Inference only: 1
+
+Dynamic load ENABLED
+
+L:0 - CREATING INPUT LAYER ...
+      Input branch: 0, Shape:96x96x1x3
+L:1 - CREATING CONVOLUTIONAL LAYER ...
+      Xavier Normal weight initialization
+      Input: 96x96x1x3, Output: 48x48x1x24 
+      Nb_groups: 1, Filters: 24f 4x4x1x3,
+      Stride: 2:2:1, padding: 1:1:0, int_padding: 0:0:0,  
+      Activation: RELU_S64.00_L0.05, Bias: 0.10, dropout rate: 0.00
+      Nb. weights: 1176, Approx layer RAM/VRAM requirement: 47 MB
+L:2 - CREATING POOL LAYER ...
+      Input: 48x48x1x24, Output: 24x24x1x24
+      P. size: 2x2x1, Stride: 2x2x1, padding: 0x0x0 
+      Pool type: MAX, Global: 0, Activation: LIN, dropout rate: 0.00
+      Approx layer RAM/VRAM requirement: 3 MB
+L:3 - CREATING CONVOLUTIONAL LAYER ...
+      Xavier Normal weight initialization
+      Input: 24x24x1x24, Output: 24x24x1x48 
+      Nb_groups: 1, Filters: 48f 3x3x1x24,
+      Stride: 1:1:1, padding: 1:1:0, int_padding: 0:0:0,  
+      Activation: RELU_S64.00_L0.05, Bias: 0.10, dropout rate: 0.00
+      Nb. weights: 10416, Approx layer RAM/VRAM requirement: 40 MB
+L:4 - CREATING CONVOLUTIONAL LAYER ...
+      Xavier Normal weight initialization
+      Input: 24x24x1x48, Output: 24x24x1x48 
+      Nb_groups: 1, Filters: 48f 3x3x1x48,
+      Stride: 1:1:1, padding: 1:1:0, int_padding: 0:0:0,  
+      Activation: RELU_S64.00_L0.05, Bias: 0.10, dropout rate: 0.00
+      Nb. weights: 20784, Approx layer RAM/VRAM requirement: 72 MB
+L:5 - CREATING POOL LAYER ...
+      Input: 24x24x1x48, Output: 12x12x1x48
+      P. size: 2x2x1, Stride: 2x2x1, padding: 0x0x0 
+      Pool type: MAX, Global: 0, Activation: LIN, dropout rate: 0.00
+      Approx layer RAM/VRAM requirement: 1 MB
+L:6 - CREATING CONVOLUTIONAL LAYER ...
+      Xavier Normal weight initialization
+      Input: 12x12x1x48, Output: 12x12x1x96 
+      Nb_groups: 1, Filters: 96f 3x3x1x48,
+      Stride: 1:1:1, padding: 1:1:0, int_padding: 0:0:0,  
+      Activation: RELU_S64.00_L0.05, Bias: 0.10, dropout rate: 0.00
+      Nb. weights: 41568, Approx layer RAM/VRAM requirement: 20 MB
+L:7 - CREATING CONVOLUTIONAL LAYER ...
+      Xavier Normal weight initialization
+      Input: 12x12x1x96, Output: 12x12x1x96 
+      Nb_groups: 1, Filters: 96f 3x3x1x96,
+      Stride: 1:1:1, padding: 1:1:0, int_padding: 0:0:0,  
+      Activation: RELU_S64.00_L0.05, Bias: 0.10, dropout rate: 0.00
+      Nb. weights: 83040, Approx layer RAM/VRAM requirement: 36 MB
+L:8 - CREATING POOL LAYER ...
+      Input: 12x12x1x96, Output: 6x6x1x96
+      P. size: 2x2x1, Stride: 2x2x1, padding: 0x0x0 
+      Pool type: MAX, Global: 0, Activation: LIN, dropout rate: 0.00
+      Approx layer RAM/VRAM requirement: 0 MB
+L:9 - CREATING CONVOLUTIONAL LAYER ...
+      Xavier Normal weight initialization
+      Input: 6x6x1x96, Output: 6x6x1x128 
+      Nb_groups: 1, Filters: 128f 3x3x1x96,
+      Stride: 1:1:1, padding: 1:1:0, int_padding: 0:0:0,  
+      Activation: RELU_S64.00_L0.05, Bias: 0.10, dropout rate: 0.00
+      Nb. weights: 110720, Approx layer RAM/VRAM requirement: 9 MB
+L:10 - CREATING CONVOLUTIONAL LAYER ...
+      Xavier Normal weight initialization
+      Input: 6x6x1x128, Output: 6x6x1x2 
+      Nb_groups: 1, Filters: 2f 1x1x1x128,
+      Stride: 1:1:1, padding: 0:0:0, int_padding: 0:0:0,  
+      Activation: LIN, Bias: 0.50, dropout rate: 0.00
+      Nb. weights: 258, Approx layer RAM/VRAM requirement: 1 MB
+ WARNING: Forward gemm TC data misalignement due to layer size mismatch
+L:11 - CREATING POOL LAYER ...
+      Input: 6x6x1x2, Output: 1x1x1x2
+      P. size: 6x6x1, Stride: 6x6x1, padding: 0x0x0 
+      Pool type: AVG, Global: 1, Activation: SMAX, dropout rate: 0.00
+      Approx layer RAM/VRAM requirement: 0 MB
+Setting test set
+
+Fwd :     0 [##############################]   16 /   16 | B.Loss: 0.00000e+00 | B.perf.: 8579.46 it/s 
+              Average forward perf.: 7936.87 it/s 
+Fwd :     0 [##############################]   16 /   16 | B.Loss: 0.00000e+00 | B.perf.: 11465.16 it/s 
+              Average forward perf.: 10791.81 it/s 
+Fwd :     0 [##############################]   16 /   16 | B.Loss: 0.00000e+00 | B.perf.: 11417.71 it/s 
+              Average forward perf.: 11591.47 it/s 
+Fwd :     0 [##############################]   16 /   16 | B.Loss: 0.00000e+00 | B.perf.: 12467.00 it/s 
+              Average forward perf.: 11365.00 it/s 
+Fwd :     0 [##############################]   16 /   16 | B.Loss: 0.00000e+00 | B.perf.: 13336.09 it/s 
+              Average forward perf.: 10553.48 it/s 
+Fwd :     0 [##############################]   16 /   16 | B.Loss: 0.00000e+00 | B.perf.: 11821.55 it/s 
+              Average forward perf.: 10784.25 it/s 
+Batch 128, 2 048 images : [190.9 177.3 180.8 195.8 191.3] ms ; médiane 190.9 ms
+RMSprop optimizer set with alpha: 0.9900, momentum: 0.9000, eps: 1e-08, centered: 0
+Network (id: 0) initialized with : 
+Batch size: 32 
+Using CUDA (FP32C_FP32A) compute method 
+Inference only: 0
+
+Dynamic load ENABLED
+
+L:0 - CREATING INPUT LAYER ...
+      Input branch: 0, Shape:96x96x1x3
+L:1 - CREATING CONVOLUTIONAL LAYER ...
+      Xavier Normal weight initialization
+      Input: 96x96x1x3, Output: 48x48x1x24 
+      Nb_groups: 1, Filters: 24f 4x4x1x3,
+      Stride: 2:2:1, padding: 1:1:0, int_padding: 0:0:0,  
+      Activation: RELU_S64.00_L0.05, Bias: 0.10, dropout rate: 0.00
+      Nb. weights: 1176, Approx layer RAM/VRAM requirement: 481 MB
+L:2 - CREATING POOL LAYER ...
+      Input: 48x48x1x24, Output: 24x24x1x24
+      P. size: 2x2x1, Stride: 2x2x1, padding: 0x0x0 
+      Pool type: MAX, Global: 0, Activation: LIN, dropout rate: 0.00
+      Approx layer RAM/VRAM requirement: 5 MB
+L:3 - CREATING CONVOLUTIONAL LAYER ...
+      Xavier Normal weight initialization
+      Input: 24x24x1x24, Output: 24x24x1x48 
+      Nb_groups: 1, Filters: 48f 3x3x1x24,
+      Stride: 1:1:1, padding: 1:1:0, int_padding: 0:0:0,  
+      Activation: RELU_S64.00_L0.05, Bias: 0.10, dropout rate: 0.00
+      Nb. weights: 10416, Approx layer RAM/VRAM requirement: 55 MB
+L:4 - CREATING CONVOLUTIONAL LAYER ...
+      Xavier Normal weight initialization
+      Input: 24x24x1x48, Output: 24x24x1x48 
+      Nb_groups: 1, Filters: 48f 3x3x1x48,
+      Stride: 1:1:1, padding: 1:1:0, int_padding: 0:0:0,  
+      Activation: RELU_S64.00_L0.05, Bias: 0.10, dropout rate: 0.00
+      Nb. weights: 20784, Approx layer RAM/VRAM requirement: 71 MB
+L:5 - CREATING POOL LAYER ...
+      Input: 24x24x1x48, Output: 12x12x1x48
+      P. size: 2x2x1, Stride: 2x2x1, padding: 0x0x0 
+      Pool type: MAX, Global: 0, Activation: LIN, dropout rate: 0.00
+      Approx layer RAM/VRAM requirement: 2 MB
+L:6 - CREATING CONVOLUTIONAL LAYER ...
+      Xavier Normal weight initialization
+      Input: 12x12x1x48, Output: 12x12x1x96 
+      Nb_groups: 1, Filters: 96f 3x3x1x48,
+      Stride: 1:1:1, padding: 1:1:0, int_padding: 0:0:0,  
+      Activation: RELU_S64.00_L0.05, Bias: 0.10, dropout rate: 0.00
+      Nb. weights: 41568, Approx layer RAM/VRAM requirement: 28 MB
+L:7 - CREATING CONVOLUTIONAL LAYER ...
+      Xavier Normal weight initialization
+      Input: 12x12x1x96, Output: 12x12x1x96 
+      Nb_groups: 1, Filters: 96f 3x3x1x96,
+      Stride: 1:1:1, padding: 1:1:0, int_padding: 0:0:0,  
+      Activation: RELU_S64.00_L0.05, Bias: 0.10, dropout rate: 0.00
+      Nb. weights: 83040, Approx layer RAM/VRAM requirement: 36 MB
+L:8 - CREATING POOL LAYER ...
+      Input: 12x12x1x96, Output: 6x6x1x96
+      P. size: 2x2x1, Stride: 2x2x1, padding: 0x0x0 
+      Pool type: MAX, Global: 0, Activation: LIN, dropout rate: 0.00
+      Approx layer RAM/VRAM requirement: 1 MB
+L:9 - CREATING CONVOLUTIONAL LAYER ...
+      Xavier Normal weight initialization
+      Input: 6x6x1x96, Output: 6x6x1x128 
+      Nb_groups: 1, Filters: 128f 3x3x1x96,
+      Stride: 1:1:1, padding: 1:1:0, int_padding: 0:0:0,  
+      Activation: RELU_S64.00_L0.05, Bias: 0.10, dropout rate: 0.00
+      Nb. weights: 110720, Approx layer RAM/VRAM requirement: 12 MB
+L:10 - CREATING CONVOLUTIONAL LAYER ...
+      Xavier Normal weight initialization
+      Input: 6x6x1x128, Output: 6x6x1x2 
+      Nb_groups: 1, Filters: 2f 1x1x1x128,
+      Stride: 1:1:1, padding: 0:0:0, int_padding: 0:0:0,  
+      Activation: LIN, Bias: 0.50, dropout rate: 0.00
+      Nb. weights: 258, Approx layer RAM/VRAM requirement: 0 MB
+L:11 - CREATING POOL LAYER ...
+      Input: 6x6x1x2, Output: 1x1x1x2
+      P. size: 6x6x1, Stride: 6x6x1, padding: 0x0x0 
+      Pool type: AVG, Global: 1, Activation: SMAX, dropout rate: 0.00
+      Approx layer RAM/VRAM requirement: 0 MB
+Setting valid set
+
+Setting test set
+
+Setting train set
+
+
+Iter:     1 [##############################]   64 /   64 | B.Loss: 7.04471e-01 | B.perf.: 3321.03 it/s 
+Total Net. nb weights: 267962 
+Total Network RAM/VRAM usage : 694 MB
+(without datasets, and prop. to batch_size)
+
+     Layer  Type       Forward             Backprop             Cumulated
+       N     T      [µs]  /  [%]         [µs]  /  [%]         [µs]  /  [%]
+  -------------------------------------------------------------------
+       1     I        0.0 /  0.0           0.0 /  0.0           0.0 /  0.0
+       2     C       18.7 / 16.0           8.4 /  4.9          27.1 /  9.4
+       3     P        2.2 /  1.9           5.5 /  3.2           7.7 /  2.7
+       4     C       18.8 / 16.1          37.0 / 21.5          55.7 / 19.3
+       5     C       34.6 / 29.7          44.2 / 25.7          78.8 / 27.3
+       6     P        1.1 /  1.0           3.2 /  1.9           4.3 /  1.5
+       7     C       11.0 /  9.4          23.7 / 13.8          34.7 / 12.0
+       8     C       21.2 / 18.2          31.5 / 18.3          52.7 / 18.3
+       9     P        1.0 /  0.9           1.3 /  0.7           2.3 /  0.8
+      10     C        5.9 /  5.1          14.5 /  8.4          20.5 /  7.1
+      11     C        1.3 /  1.1           2.7 /  1.6           4.0 /  1.4
+      12     P        0.8 /  0.7           0.0 /  0.0           0.9 /  0.3
+  -------------------------------------------------------------------
+   Total            116.6 µs             172.0 µs             288.6 µs       
+
+
+Iter:     2 [##############################]   64 /   64 | B.Loss: 6.74962e-01 | B.perf.: 3106.61 it/s 
+Iter:     3 [##############################]   64 /   64 | B.Loss: 7.14017e-01 | B.perf.: 3137.38 it/s 
+Iter:     4 [##############################]   64 /   64 | B.Loss: 7.07859e-01 | B.perf.: 3193.36 it/s 
+Iter:     5 [##############################]   64 /   64 | B.Loss: 7.08361e-01 | B.perf.: 3131.38 it/s 
+Iter:     6 [##############################]   64 /   64 | B.Loss: 6.97021e-01 | B.perf.: 3255.79 it/s 
+Iter:     7 [##############################]   64 /   64 | B.Loss: 6.80059e-01 | B.perf.: 2261.02 it/s 
+Iter:     8 [##############################]   64 /   64 | B.Loss: 6.27485e-01 | B.perf.: 3073.09 it/s 
+Iter:     9 [##############################]   64 /   64 | B.Loss: 6.37124e-01 | B.perf.: 3090.03 it/s 
+Iter:    10 [##############################]   64 /   64 | B.Loss: 6.36028e-01 | B.perf.: 3378.18 it/s 
+Iter:    11 [##############################]   64 /   64 | B.Loss: 7.15066e-01 | B.perf.: 2874.83 it/s 
+Iter:    12 [##############################]   64 /   64 | B.Loss: 7.06681e-01 | B.perf.: 3076.90 it/s 
+Iter:    13 [##############################]   64 /   64 | B.Loss: 6.01729e-01 | B.perf.: 3333.44 it/s 
+Iter:    14 [##############################]   64 /   64 | B.Loss: 8.30184e-01 | B.perf.: 2491.57 it/s 
+Iter:    15 [##############################]   64 /   64 | B.Loss: 8.17141e-01 | B.perf.: 635.51 it/s 
+Iter:    16 [##############################]   64 /   64 | B.Loss: 6.17864e-01 | B.perf.: 3487.49 it/s 
+Iter:    17 [##############################]   64 /   64 | B.Loss: 6.23709e-01 | B.perf.: 3344.36 it/s 
+Iter:    18 [##############################]   64 /   64 | B.Loss: 6.17000e-01 | B.perf.: 3495.13 it/s 
+Iter:    19 [##############################]   64 /   64 | B.Loss: 6.61399e-01 | B.perf.: 3184.12 it/s 
+Iter:    20 [##############################]   64 /   64 | B.Loss: 4.80082e-01 | B.perf.: 3290.78 it/s 
+Iter:    21 [##############################]   64 /   64 | B.Loss: 6.25225e-01 | B.perf.: 4059.46 it/s 
+Iter:    22 [##############################]   64 /   64 | B.Loss: 6.70591e-01 | B.perf.: 3794.19 it/s 
+Iter:    23 [##############################]   64 /   64 | B.Loss: 6.06984e-01 | B.perf.: 3338.74 it/s 
+Iter:    24 [##############################]   64 /   64 | B.Loss: 5.82181e-01 | B.perf.: 3175.06 it/s 
+Iter:    25 [##############################]   64 /   64 | B.Loss: 6.74574e-01 | B.perf.: 3261.71 it/s 
+Iter:    26 [##############################]   64 /   64 | B.Loss: 4.63316e-01 | B.perf.: 3380.78 it/s 
+Iter:    27 [##############################]   64 /   64 | B.Loss: 4.93602e-01 | B.perf.: 3324.84 it/s 
+Iter:    28 [##############################]   64 /   64 | B.Loss: 5.46319e-01 | B.perf.: 2941.02 it/s 
+Iter:    29 [##############################]   64 /   64 | B.Loss: 4.71792e-01 | B.perf.: 2183.65 it/s 
+Iter:    30 [##############################]   64 /   64 | B.Loss: 5.34786e-01 | B.perf.: 3030.92 it/s 
+Iter:    31 [##############################]   64 /   64 | B.Loss: 5.57198e-01 | B.perf.: 3411.64 it/s 
+Iter:    32 [##############################]   64 /   64 | B.Loss: 4.90353e-01 | B.perf.: 3216.21 it/s 
+Iter:    33 [##############################]   64 /   64 | B.Loss: 4.30943e-01 | B.perf.: 3652.74 it/s 
+Iter:    34 [##############################]   64 /   64 | B.Loss: 4.77284e-01 | B.perf.: 3890.11 it/s 
+Iter:    35 [##############################]   64 /   64 | B.Loss: 5.90681e-01 | B.perf.: 3399.87 it/s 
+Iter:    36 [##############################]   64 /   64 | B.Loss: 5.67469e-01 | B.perf.: 2341.20 it/s 
+Iter:    37 [##############################]   64 /   64 | B.Loss: 3.98832e-01 | B.perf.: 3430.17 it/s 
+Iter:    38 [##############################]   64 /   64 | B.Loss: 3.89245e-01 | B.perf.: 3273.74 it/s 
+Iter:    39 [##############################]   64 /   64 | B.Loss: 3.73500e-01 | B.perf.: 3588.94 it/s 
+Iter:    40 [##############################]   64 /   64 | B.Loss: 5.19013e-01 | B.perf.: 3409.92 it/s 
+Iter:    41 [##############################]   64 /   64 | B.Loss: 4.53983e-01 | B.perf.: 3453.68 it/s 
+Iter:    42 [##############################]   64 /   64 | B.Loss: 3.59390e-01 | B.perf.: 3518.07 it/s 
+Iter:    43 [##############################]   64 /   64 | B.Loss: 4.06713e-01 | B.perf.: 3334.41 it/s 
+Iter:    44 [##############################]   64 /   64 | B.Loss: 4.04774e-01 | B.perf.: 3277.94 it/s 
+Iter:    45 [##############################]   64 /   64 | B.Loss: 3.46014e-01 | B.perf.: 2805.52 it/s 
+Iter:    46 [##############################]   64 /   64 | B.Loss: 4.85755e-01 | B.perf.: 1914.53 it/s 
+Iter:    47 [##############################]   64 /   64 | B.Loss: 4.39081e-01 | B.perf.: 3336.76 it/s 
+Iter:    48 [##############################]   64 /   64 | B.Loss: 3.98902e-01 | B.perf.: 1694.38 it/s 
+Iter:    49 [##############################]   64 /   64 | B.Loss: 5.10053e-01 | B.perf.: 3232.09 it/s 
+Iter:    50 [##############################]   64 /   64 | B.Loss: 5.61604e-01 | B.perf.: 3415.13 it/s 
+              Average Training perf.: 2949.99 it/s | Mean Loss: 4.52124e-01 | Learning rate: 2.93017e-04 | Weight decay: 0.01000
+Fwd :    50 [##############################]   64 /   64 | B.Loss: 3.72311e-01 | B.perf.: 7597.69 it/s 
+              Average forward perf.: 6063.51 it/s | Mean Loss: 3.30374e-01
+
+   *******  ConfMat  *******   Recall
+          876 |     148 |      85.55%
+          135 |     889 |      86.82%
+Prec.   86.65%    85.73%  Acc  86.18%
+Fwd :    50 [##############################]   64 /   64 | B.Loss: 0.00000e+00 | B.perf.: 7250.79 it/s 
+              Average forward perf.: 7233.82 it/s 
+Iter 50 | 1.46 min | accuracy 86.18% | meilleur checkpoint 50
+
+Iter:    51 [##############################]   64 /   64 | B.Loss: 3.92932e-01 | B.perf.: 3393.80 it/s 
+Iter:    52 [##############################]   64 /   64 | B.Loss: 3.83499e-01 | B.perf.: 2594.73 it/s 
+Iter:    53 [##############################]   64 /   64 | B.Loss: 3.73387e-01 | B.perf.: 2910.03 it/s 
+Iter:    54 [##############################]   64 /   64 | B.Loss: 5.37135e-01 | B.perf.: 3344.21 it/s 
+Iter:    55 [##############################]   64 /   64 | B.Loss: 3.53636e-01 | B.perf.: 3446.17 it/s 
+Iter:    56 [##############################]   64 /   64 | B.Loss: 4.72415e-01 | B.perf.: 3198.45 it/s 
+Iter:    57 [##############################]   64 /   64 | B.Loss: 4.30933e-01 | B.perf.: 3502.16 it/s 
+Iter:    58 [##############################]   64 /   64 | B.Loss: 3.70006e-01 | B.perf.: 3462.42 it/s 
+Iter:    59 [##############################]   64 /   64 | B.Loss: 4.62632e-01 | B.perf.: 3543.84 it/s 
+Iter:    60 [##############################]   64 /   64 | B.Loss: 3.82581e-01 | B.perf.: 2061.17 it/s 
+Iter:    61 [##############################]   64 /   64 | B.Loss: 3.44156e-01 | B.perf.: 3364.50 it/s 
+Iter:    62 [##############################]   64 /   64 | B.Loss: 4.12252e-01 | B.perf.: 3428.67 it/s 
+Iter:    63 [##############################]   64 /   64 | B.Loss: 4.01217e-01 | B.perf.: 3778.15 it/s 
+Iter:    64 [##############################]   64 /   64 | B.Loss: 3.72059e-01 | B.perf.: 3557.20 it/s 
+Iter:    65 [##############################]   64 /   64 | B.Loss: 2.50167e-01 | B.perf.: 3729.83 it/s 
+Iter:    66 [##############################]   64 /   64 | B.Loss: 3.72980e-01 | B.perf.: 3305.35 it/s 
+Iter:    67 [##############################]   64 /   64 | B.Loss: 3.66457e-01 | B.perf.: 2912.90 it/s 
+Iter:    68 [##############################]   64 /   64 | B.Loss: 4.22683e-01 | B.perf.: 3729.87 it/s 
+Iter:    69 [##############################]   64 /   64 | B.Loss: 3.53497e-01 | B.perf.: 3076.21 it/s 
+Iter:    70 [##############################]   64 /   64 | B.Loss: 4.93368e-01 | B.perf.: 3445.88 it/s 
+Iter:    71 [##############################]   64 /   64 | B.Loss: 3.99402e-01 | B.perf.: 3449.26 it/s 
+Iter:    72 [##############################]   64 /   64 | B.Loss: 3.15062e-01 | B.perf.: 3135.17 it/s 
+Iter:    73 [##############################]   64 /   64 | B.Loss: 2.77944e-01 | B.perf.: 3403.03 it/s 
+Iter:    74 [##############################]   64 /   64 | B.Loss: 3.34913e-01 | B.perf.: 3168.73 it/s 
+Iter:    75 [##############################]   64 /   64 | B.Loss: 3.88372e-01 | B.perf.: 3021.83 it/s 
+Iter:    76 [##############################]   64 /   64 | B.Loss: 2.67060e-01 | B.perf.: 2098.68 it/s 
+Iter:    77 [##############################]   64 /   64 | B.Loss: 4.32335e-01 | B.perf.: 3426.85 it/s 
+Iter:    78 [##############################]   64 /   64 | B.Loss: 3.25509e-01 | B.perf.: 3141.84 it/s 
+Iter:    79 [##############################]   64 /   64 | B.Loss: 3.86702e-01 | B.perf.: 3350.75 it/s 
+Iter:    80 [##############################]   64 /   64 | B.Loss: 3.64629e-01 | B.perf.: 3283.83 it/s 
+Iter:    81 [##############################]   64 /   64 | B.Loss: 3.55175e-01 | B.perf.: 4260.65 it/s 
+Iter:    82 [##############################]   64 /   64 | B.Loss: 2.83192e-01 | B.perf.: 3543.52 it/s 
+Iter:    83 [##############################]   64 /   64 | B.Loss: 5.03853e-01 | B.perf.: 2126.38 it/s 
+Iter:    84 [##############################]   64 /   64 | B.Loss: 3.39701e-01 | B.perf.: 3265.86 it/s 
+Iter:    85 [##############################]   64 /   64 | B.Loss: 3.76325e-01 | B.perf.: 3164.59 it/s 
+Iter:    86 [##############################]   64 /   64 | B.Loss: 3.60068e-01 | B.perf.: 3358.68 it/s 
+Iter:    87 [##############################]   64 /   64 | B.Loss: 3.19204e-01 | B.perf.: 3340.59 it/s 
+Iter:    88 [##############################]   64 /   64 | B.Loss: 2.72098e-01 | B.perf.: 3341.18 it/s 
+Iter:    89 [##############################]   64 /   64 | B.Loss: 3.65119e-01 | B.perf.: 3417.04 it/s 
+Iter:    90 [##############################]   64 /   64 | B.Loss: 3.48152e-01 | B.perf.: 2279.36 it/s 
+Iter:    91 [##############################]   64 /   64 | B.Loss: 5.17984e-01 | B.perf.: 2502.10 it/s 
+Iter:    92 [##############################]   64 /   64 | B.Loss: 4.43701e-01 | B.perf.: 3195.95 it/s 
+Iter:    93 [##############################]   64 /   64 | B.Loss: 2.94945e-01 | B.perf.: 2795.31 it/s 
+Iter:    94 [##############################]   64 /   64 | B.Loss: 3.42953e-01 | B.perf.: 3324.97 it/s 
+Iter:    95 [##############################]   64 /   64 | B.Loss: 3.57330e-01 | B.perf.: 3110.29 it/s 
+Iter:    96 [##############################]   64 /   64 | B.Loss: 3.72940e-01 | B.perf.: 3436.87 it/s 
+Iter:    97 [##############################]   64 /   64 | B.Loss: 4.18854e-01 | B.perf.: 3249.60 it/s 
+Iter:    98 [##############################]   64 /   64 | B.Loss: 3.05919e-01 | B.perf.: 2425.17 it/s 
+Iter:    99 [##############################]   64 /   64 | B.Loss: 3.21309e-01 | B.perf.: 2354.22 it/s 
+Iter:   100 [##############################]   64 /   64 | B.Loss: 3.60463e-01 | B.perf.: 3449.75 it/s 
+              Average Training perf.: 3046.92 it/s | Mean Loss: 3.59298e-01 | Learning rate: 2.72185e-04 | Weight decay: 0.01000
+Fwd :   100 [##############################]   64 /   64 | B.Loss: 2.71788e-01 | B.perf.: 7024.30 it/s 
+              Average forward perf.: 5927.41 it/s | Mean Loss: 2.68870e-01
+
+   *******  ConfMat  *******   Recall
+          920 |     104 |      89.84%
+           85 |     939 |      91.70%
+Prec.   91.54%    90.03%  Acc  90.77%
+Fwd :   100 [##############################]   64 /   64 | B.Loss: 0.00000e+00 | B.perf.: 7124.69 it/s 
+              Average forward perf.: 7378.01 it/s 
+Iter 100 | 2.92 min | accuracy 90.77% | meilleur checkpoint 100
+
+Iter:   101 [##############################]   64 /   64 | B.Loss: 3.70608e-01 | B.perf.: 3273.14 it/s 
+Iter:   102 [##############################]   64 /   64 | B.Loss: 4.15506e-01 | B.perf.: 3038.65 it/s 
+Iter:   103 [##############################]   64 /   64 | B.Loss: 3.32581e-01 | B.perf.: 3431.07 it/s 
+Iter:   104 [##############################]   64 /   64 | B.Loss: 3.77055e-01 | B.perf.: 3660.70 it/s 
+Iter:   105 [##############################]   64 /   64 | B.Loss: 4.46126e-01 | B.perf.: 3496.47 it/s 
+Iter:   106 [##############################]   64 /   64 | B.Loss: 3.27926e-01 | B.perf.: 2127.73 it/s 
+Iter:   107 [##############################]   64 /   64 | B.Loss: 3.96007e-01 | B.perf.: 3728.81 it/s 
+Iter:   108 [##############################]   64 /   64 | B.Loss: 2.50725e-01 | B.perf.: 3654.38 it/s 
+Iter:   109 [##############################]   64 /   64 | B.Loss: 3.75766e-01 | B.perf.: 2719.67 it/s 
+Iter:   110 [##############################]   64 /   64 | B.Loss: 4.42719e-01 | B.perf.: 3377.40 it/s 
+Iter:   111 [##############################]   64 /   64 | B.Loss: 2.96988e-01 | B.perf.: 3274.45 it/s 
+Iter:   112 [##############################]   64 /   64 | B.Loss: 3.37510e-01 | B.perf.: 3367.22 it/s 
+Iter:   113 [##############################]   64 /   64 | B.Loss: 2.88012e-01 | B.perf.: 1883.40 it/s 
+Iter:   114 [##############################]   64 /   64 | B.Loss: 2.76357e-01 | B.perf.: 2856.11 it/s 
+Iter:   115 [##############################]   64 /   64 | B.Loss: 2.38562e-01 | B.perf.: 2819.39 it/s 
+Iter:   116 [##############################]   64 /   64 | B.Loss: 3.14394e-01 | B.perf.: 3055.55 it/s 
+Iter:   117 [##############################]   64 /   64 | B.Loss: 3.79132e-01 | B.perf.: 3244.09 it/s 
+Iter:   118 [##############################]   64 /   64 | B.Loss: 2.94413e-01 | B.perf.: 3541.28 it/s 
+Iter:   119 [##############################]   64 /   64 | B.Loss: 2.91250e-01 | B.perf.: 3054.87 it/s 
+Iter:   120 [##############################]   64 /   64 | B.Loss: 3.11280e-01 | B.perf.: 3107.87 it/s 
+Iter:   121 [##############################]   64 /   64 | B.Loss: 3.98955e-01 | B.perf.: 3369.12 it/s 
+Iter:   122 [##############################]   64 /   64 | B.Loss: 3.90226e-01 | B.perf.: 2917.25 it/s 
+Iter:   123 [##############################]   64 /   64 | B.Loss: 2.85898e-01 | B.perf.: 3475.49 it/s 
+Iter:   124 [##############################]   64 /   64 | B.Loss: 3.40587e-01 | B.perf.: 3221.48 it/s 
+Iter:   125 [##############################]   64 /   64 | B.Loss: 3.36769e-01 | B.perf.: 3402.90 it/s 
+Iter:   126 [##############################]   64 /   64 | B.Loss: 2.39039e-01 | B.perf.: 3257.81 it/s 
+Iter:   127 [##############################]   64 /   64 | B.Loss: 3.25792e-01 | B.perf.: 3264.99 it/s 
+Iter:   128 [##############################]   64 /   64 | B.Loss: 3.40285e-01 | B.perf.: 3377.14 it/s 
+Iter:   129 [##############################]   64 /   64 | B.Loss: 2.60183e-01 | B.perf.: 2116.56 it/s 
+Iter:   130 [##############################]   64 /   64 | B.Loss: 2.48453e-01 | B.perf.: 3208.81 it/s 
+Iter:   131 [##############################]   64 /   64 | B.Loss: 3.10730e-01 | B.perf.: 3108.07 it/s 
+Iter:   132 [##############################]   64 /   64 | B.Loss: 3.12256e-01 | B.perf.: 3677.08 it/s 
+Iter:   133 [##############################]   64 /   64 | B.Loss: 3.87971e-01 | B.perf.: 3476.87 it/s 
+Iter:   134 [##############################]   64 /   64 | B.Loss: 2.64132e-01 | B.perf.: 3657.22 it/s 
+Iter:   135 [##############################]   64 /   64 | B.Loss: 3.26860e-01 | B.perf.: 3411.64 it/s 
+Iter:   136 [##############################]   64 /   64 | B.Loss: 3.12909e-01 | B.perf.: 3542.27 it/s 
+Iter:   137 [##############################]   64 /   64 | B.Loss: 3.34830e-01 | B.perf.: 2177.74 it/s 
+Iter:   138 [##############################]   64 /   64 | B.Loss: 2.48773e-01 | B.perf.: 2184.29 it/s 
+Iter:   139 [##############################]   64 /   64 | B.Loss: 4.70391e-01 | B.perf.: 3260.22 it/s 
+Iter:   140 [##############################]   64 /   64 | B.Loss: 3.72503e-01 | B.perf.: 3409.68 it/s 
+Iter:   141 [##############################]   64 /   64 | B.Loss: 3.14660e-01 | B.perf.: 3320.44 it/s 
+Iter:   142 [##############################]   64 /   64 | B.Loss: 3.21239e-01 | B.perf.: 3455.62 it/s 
+Iter:   143 [##############################]   64 /   64 | B.Loss: 2.92327e-01 | B.perf.: 3549.79 it/s 
+Iter:   144 [##############################]   64 /   64 | B.Loss: 3.20499e-01 | B.perf.: 2505.15 it/s 
+Iter:   145 [##############################]   64 /   64 | B.Loss: 3.11495e-01 | B.perf.: 1537.79 it/s 
+Iter:   146 [##############################]   64 /   64 | B.Loss: 3.88322e-01 | B.perf.: 3039.87 it/s 
+Iter:   147 [##############################]   64 /   64 | B.Loss: 2.67714e-01 | B.perf.: 3646.96 it/s 
+Iter:   148 [##############################]   64 /   64 | B.Loss: 3.28825e-01 | B.perf.: 3479.65 it/s 
+Iter:   149 [##############################]   64 /   64 | B.Loss: 4.13750e-01 | B.perf.: 2942.56 it/s 
+Iter:   150 [##############################]   64 /   64 | B.Loss: 3.40638e-01 | B.perf.: 3761.10 it/s 
+              Average Training perf.: 2860.61 it/s | Mean Loss: 3.30625e-01 | Learning rate: 2.39539e-04 | Weight decay: 0.01000
+Fwd :   150 [##############################]   64 /   64 | B.Loss: 2.95443e-01 | B.perf.: 7242.91 it/s 
+              Average forward perf.: 5856.76 it/s | Mean Loss: 2.30598e-01
+
+   *******  ConfMat  *******   Recall
+          946 |      78 |      92.38%
+           96 |     928 |      90.62%
+Prec.   90.79%    92.25%  Acc  91.50%
+Fwd :   150 [##############################]   64 /   64 | B.Loss: 0.00000e+00 | B.perf.: 7506.49 it/s 
+              Average forward perf.: 7249.71 it/s 
+Iter 150 | 4.37 min | accuracy 91.50% | meilleur checkpoint 150
+
+Iter:   151 [##############################]   64 /   64 | B.Loss: 3.46787e-01 | B.perf.: 3019.29 it/s 
+Iter:   152 [##############################]   64 /   64 | B.Loss: 2.82833e-01 | B.perf.: 2493.04 it/s 
+Iter:   153 [##############################]   64 /   64 | B.Loss: 3.88864e-01 | B.perf.: 3425.90 it/s 
+Iter:   154 [##############################]   64 /   64 | B.Loss: 3.01212e-01 | B.perf.: 3637.00 it/s 
+Iter:   155 [##############################]   64 /   64 | B.Loss: 2.82176e-01 | B.perf.: 3353.13 it/s 
+Iter:   156 [##############################]   64 /   64 | B.Loss: 3.20720e-01 | B.perf.: 2793.64 it/s 
+Iter:   157 [##############################]   64 /   64 | B.Loss: 2.41294e-01 | B.perf.: 3385.52 it/s 
+Iter:   158 [##############################]   64 /   64 | B.Loss: 3.60839e-01 | B.perf.: 1807.16 it/s 
+Iter:   159 [##############################]   64 /   64 | B.Loss: 4.45084e-01 | B.perf.: 2000.74 it/s 
+Iter:   160 [##############################]   64 /   64 | B.Loss: 4.37321e-01 | B.perf.: 2468.81 it/s 
+Iter:   161 [##############################]   64 /   64 | B.Loss: 3.03978e-01 | B.perf.: 3108.95 it/s 
+Iter:   162 [##############################]   64 /   64 | B.Loss: 4.30290e-01 | B.perf.: 3195.80 it/s 
+Iter:   163 [##############################]   64 /   64 | B.Loss: 3.90512e-01 | B.perf.: 3618.02 it/s 
+Iter:   164 [##############################]   64 /   64 | B.Loss: 2.50582e-01 | B.perf.: 3201.12 it/s 
+Iter:   165 [##############################]   64 /   64 | B.Loss: 5.46290e-01 | B.perf.: 3420.73 it/s 
+Iter:   166 [##############################]   64 /   64 | B.Loss: 2.92875e-01 | B.perf.: 3726.64 it/s 
+Iter:   167 [##############################]   64 /   64 | B.Loss: 2.75665e-01 | B.perf.: 2914.87 it/s 
+Iter:   168 [##############################]   64 /   64 | B.Loss: 2.30405e-01 | B.perf.: 2007.37 it/s 
+Iter:   169 [##############################]   64 /   64 | B.Loss: 2.26570e-01 | B.perf.: 3271.98 it/s 
+Iter:   170 [##############################]   64 /   64 | B.Loss: 3.32358e-01 | B.perf.: 3762.23 it/s 
+Iter:   171 [##############################]   64 /   64 | B.Loss: 3.24524e-01 | B.perf.: 3782.81 it/s 
+Iter:   172 [##############################]   64 /   64 | B.Loss: 3.22399e-01 | B.perf.: 3552.49 it/s 
+Iter:   173 [##############################]   64 /   64 | B.Loss: 3.12352e-01 | B.perf.: 3260.56 it/s 
+Iter:   174 [##############################]   64 /   64 | B.Loss: 3.82311e-01 | B.perf.: 3470.38 it/s 
+Iter:   175 [##############################]   64 /   64 | B.Loss: 2.99885e-01 | B.perf.: 2135.96 it/s 
+Iter:   176 [##############################]   64 /   64 | B.Loss: 2.95175e-01 | B.perf.: 3228.89 it/s 
+Iter:   177 [##############################]   64 /   64 | B.Loss: 4.33940e-01 | B.perf.: 3736.21 it/s 
+Iter:   178 [##############################]   64 /   64 | B.Loss: 3.56481e-01 | B.perf.: 3368.83 it/s 
+Iter:   179 [##############################]   64 /   64 | B.Loss: 2.62104e-01 | B.perf.: 3279.43 it/s 
+Iter:   180 [##############################]   64 /   64 | B.Loss: 3.86230e-01 | B.perf.: 3409.49 it/s 
+Iter:   181 [##############################]   64 /   64 | B.Loss: 3.22503e-01 | B.perf.: 3543.59 it/s 
+Iter:   182 [##############################]   64 /   64 | B.Loss: 3.77548e-01 | B.perf.: 1781.85 it/s 
+Iter:   183 [##############################]   64 /   64 | B.Loss: 2.18863e-01 | B.perf.: 2169.23 it/s 
+Iter:   184 [##############################]   64 /   64 | B.Loss: 3.37349e-01 | B.perf.: 3472.43 it/s 
+Iter:   185 [##############################]   64 /   64 | B.Loss: 3.52892e-01 | B.perf.: 3448.73 it/s 
+Iter:   186 [##############################]   64 /   64 | B.Loss: 2.91415e-01 | B.perf.: 2553.72 it/s 
+Iter:   187 [##############################]   64 /   64 | B.Loss: 2.79191e-01 | B.perf.: 3518.67 it/s 
+Iter:   188 [##############################]   64 /   64 | B.Loss: 2.68901e-01 | B.perf.: 3184.66 it/s 
+Iter:   189 [##############################]   64 /   64 | B.Loss: 2.71459e-01 | B.perf.: 3516.99 it/s 
+Iter:   190 [##############################]   64 /   64 | B.Loss: 2.22593e-01 | B.perf.: 2102.07 it/s 
+Iter:   191 [##############################]   64 /   64 | B.Loss: 3.64333e-01 | B.perf.: 3567.58 it/s 
+Iter:   192 [##############################]   64 /   64 | B.Loss: 2.54835e-01 | B.perf.: 3737.28 it/s 
+Iter:   193 [##############################]   64 /   64 | B.Loss: 2.84810e-01 | B.perf.: 2191.98 it/s 
+Iter:   194 [##############################]   64 /   64 | B.Loss: 2.32769e-01 | B.perf.: 3324.52 it/s 
+Iter:   195 [##############################]   64 /   64 | B.Loss: 2.85609e-01 | B.perf.: 3348.03 it/s 
+Iter:   196 [##############################]   64 /   64 | B.Loss: 2.52407e-01 | B.perf.: 3762.10 it/s 
+Iter:   197 [##############################]   64 /   64 | B.Loss: 2.68639e-01 | B.perf.: 3106.89 it/s 
+Iter:   198 [##############################]   64 /   64 | B.Loss: 3.27533e-01 | B.perf.: 1815.14 it/s 
+Iter:   199 [##############################]   64 /   64 | B.Loss: 3.10963e-01 | B.perf.: 3444.21 it/s 
+Iter:   200 [##############################]   64 /   64 | B.Loss: 2.44799e-01 | B.perf.: 3218.34 it/s 
+              Average Training perf.: 2890.27 it/s | Mean Loss: 2.96432e-01 | Learning rate: 1.98275e-04 | Weight decay: 0.01000
+Fwd :   200 [##############################]   64 /   64 | B.Loss: 8.98625e-02 | B.perf.: 6859.84 it/s 
+              Average forward perf.: 5457.00 it/s | Mean Loss: 2.44723e-01
+
+   *******  ConfMat  *******   Recall
+          834 |     190 |      81.45%
+           27 |     997 |      97.36%
+Prec.   96.86%    83.99%  Acc  89.40%
+Fwd :   200 [##############################]   64 /   64 | B.Loss: 0.00000e+00 | B.perf.: 7371.86 it/s 
+              Average forward perf.: 7234.90 it/s 
+Iter 200 | 5.86 min | accuracy 89.40% | meilleur checkpoint 150
+
+Iter:   201 [##############################]   64 /   64 | B.Loss: 2.96396e-01 | B.perf.: 3566.63 it/s 
+Iter:   202 [##############################]   64 /   64 | B.Loss: 2.52328e-01 | B.perf.: 3544.58 it/s 
+Iter:   203 [##############################]   64 /   64 | B.Loss: 2.92355e-01 | B.perf.: 3704.38 it/s 
+Iter:   204 [##############################]   64 /   64 | B.Loss: 3.00332e-01 | B.perf.: 3412.07 it/s 
+Iter:   205 [##############################]   64 /   64 | B.Loss: 2.73234e-01 | B.perf.: 2123.79 it/s 
+Iter:   206 [##############################]   64 /   64 | B.Loss: 2.43717e-01 | B.perf.: 3433.45 it/s 
+Iter:   207 [##############################]   64 /   64 | B.Loss: 2.59606e-01 | B.perf.: 3668.81 it/s 
+Iter:   208 [##############################]   64 /   64 | B.Loss: 3.21172e-01 | B.perf.: 2229.56 it/s 
+Iter:   209 [##############################]   64 /   64 | B.Loss: 2.60153e-01 | B.perf.: 3700.62 it/s 
+Iter:   210 [##############################]   64 /   64 | B.Loss: 2.32355e-01 | B.perf.: 3153.93 it/s 
+Iter:   211 [##############################]   64 /   64 | B.Loss: 3.19650e-01 | B.perf.: 3712.37 it/s 
+Iter:   212 [##############################]   64 /   64 | B.Loss: 2.80091e-01 | B.perf.: 3369.31 it/s 
+Iter:   213 [##############################]   64 /   64 | B.Loss: 2.40828e-01 | B.perf.: 2188.59 it/s 
+Iter:   214 [##############################]   64 /   64 | B.Loss: 3.44145e-01 | B.perf.: 3279.81 it/s 
+Iter:   215 [##############################]   64 /   64 | B.Loss: 2.55475e-01 | B.perf.: 3570.14 it/s 
+Iter:   216 [##############################]   64 /   64 | B.Loss: 2.63358e-01 | B.perf.: 3346.40 it/s 
+Iter:   217 [##############################]   64 /   64 | B.Loss: 2.83484e-01 | B.perf.: 3729.24 it/s 
+Iter:   218 [##############################]   64 /   64 | B.Loss: 2.58866e-01 | B.perf.: 3207.06 it/s 
+Iter:   219 [##############################]   64 /   64 | B.Loss: 2.39511e-01 | B.perf.: 3443.98 it/s 
+Iter:   220 [##############################]   64 /   64 | B.Loss: 3.53852e-01 | B.perf.: 2224.62 it/s 
+Iter:   221 [##############################]   64 /   64 | B.Loss: 3.07353e-01 | B.perf.: 3633.30 it/s 
+Iter:   222 [##############################]   64 /   64 | B.Loss: 3.84210e-01 | B.perf.: 3657.22 it/s 
+Iter:   223 [##############################]   64 /   64 | B.Loss: 3.53283e-01 | B.perf.: 3464.87 it/s 
+Iter:   224 [##############################]   64 /   64 | B.Loss: 2.83817e-01 | B.perf.: 3727.27 it/s 
+Iter:   225 [##############################]   64 /   64 | B.Loss: 2.40155e-01 | B.perf.: 3455.89 it/s 
+Iter:   226 [##############################]   64 /   64 | B.Loss: 2.87724e-01 | B.perf.: 2549.24 it/s 
+Iter:   227 [##############################]   64 /   64 | B.Loss: 3.08477e-01 | B.perf.: 3273.88 it/s 
+Iter:   228 [##############################]   64 /   64 | B.Loss: 2.51379e-01 | B.perf.: 2422.16 it/s 
+Iter:   229 [##############################]   64 /   64 | B.Loss: 2.12085e-01 | B.perf.: 3839.26 it/s 
+Iter:   230 [##############################]   64 /   64 | B.Loss: 2.44253e-01 | B.perf.: 3469.69 it/s 
+Iter:   231 [##############################]   64 /   64 | B.Loss: 2.58017e-01 | B.perf.: 3644.86 it/s 
+Iter:   232 [##############################]   64 /   64 | B.Loss: 2.91620e-01 | B.perf.: 1972.16 it/s 
+Iter:   233 [##############################]   64 /   64 | B.Loss: 2.73101e-01 | B.perf.: 3418.20 it/s 
+Iter:   234 [##############################]   64 /   64 | B.Loss: 2.28711e-01 | B.perf.: 3747.44 it/s 
+Iter:   235 [##############################]   64 /   64 | B.Loss: 2.55478e-01 | B.perf.: 3274.88 it/s 
+Iter:   236 [##############################]   64 /   64 | B.Loss: 4.21579e-01 | B.perf.: 3916.70 it/s 
+Iter:   237 [##############################]   64 /   64 | B.Loss: 2.50973e-01 | B.perf.: 1801.22 it/s 
+Iter:   238 [##############################]   64 /   64 | B.Loss: 3.59018e-01 | B.perf.: 3404.30 it/s 
+Iter:   239 [##############################]   64 /   64 | B.Loss: 3.32878e-01 | B.perf.: 3583.78 it/s 
+Iter:   240 [##############################]   64 /   64 | B.Loss: 2.96931e-01 | B.perf.: 2460.88 it/s 
+Iter:   241 [##############################]   64 /   64 | B.Loss: 4.79047e-01 | B.perf.: 3316.47 it/s 
+Iter:   242 [##############################]   64 /   64 | B.Loss: 2.27052e-01 | B.perf.: 3385.55 it/s 
+Iter:   243 [##############################]   64 /   64 | B.Loss: 2.87894e-01 | B.perf.: 3639.63 it/s 
+Iter:   244 [##############################]   64 /   64 | B.Loss: 4.30072e-01 | B.perf.: 2113.17 it/s 
+Iter:   245 [##############################]   64 /   64 | B.Loss: 3.04367e-01 | B.perf.: 3128.41 it/s 
+Iter:   246 [##############################]   64 /   64 | B.Loss: 3.29099e-01 | B.perf.: 3667.65 it/s 
+Iter:   247 [##############################]   64 /   64 | B.Loss: 2.93102e-01 | B.perf.: 3595.67 it/s 
+Iter:   248 [##############################]   64 /   64 | B.Loss: 3.57435e-01 | B.perf.: 3586.65 it/s 
+Iter:   249 [##############################]   64 /   64 | B.Loss: 3.57316e-01 | B.perf.: 3398.74 it/s 
+Iter:   250 [##############################]   64 /   64 | B.Loss: 2.73967e-01 | B.perf.: 3596.80 it/s 
+              Average Training perf.: 2868.65 it/s | Mean Loss: 2.79271e-01 | Learning rate: 1.52433e-04 | Weight decay: 0.01000
+Fwd :   250 [##############################]   64 /   64 | B.Loss: 2.60275e-01 | B.perf.: 4928.88 it/s 
+              Average forward perf.: 5364.87 it/s | Mean Loss: 2.08811e-01
+
+   *******  ConfMat  *******   Recall
+          974 |      50 |      95.12%
+          104 |     920 |      89.84%
+Prec.   90.35%    94.85%  Acc  92.48%
+Fwd :   250 [##############################]   64 /   64 | B.Loss: 0.00000e+00 | B.perf.: 7876.74 it/s 
+              Average forward perf.: 5585.94 it/s 
+Iter 250 | 7.32 min | accuracy 92.48% | meilleur checkpoint 250
+
+Iter:   251 [##############################]   64 /   64 | B.Loss: 2.43940e-01 | B.perf.: 2204.52 it/s 
+Iter:   252 [##############################]   64 /   64 | B.Loss: 2.81633e-01 | B.perf.: 2510.34 it/s 
+Iter:   253 [##############################]   64 /   64 | B.Loss: 2.71951e-01 | B.perf.: 3411.35 it/s 
+Iter:   254 [##############################]   64 /   64 | B.Loss: 3.35613e-01 | B.perf.: 3404.53 it/s 
+Iter:   255 [##############################]   64 /   64 | B.Loss: 2.14030e-01 | B.perf.: 3935.09 it/s 
+Iter:   256 [##############################]   64 /   64 | B.Loss: 2.32747e-01 | B.perf.: 3719.77 it/s 
+Iter:   257 [##############################]   64 /   64 | B.Loss: 2.39938e-01 | B.perf.: 3480.82 it/s 
+Iter:   258 [##############################]   64 /   64 | B.Loss: 2.56280e-01 | B.perf.: 3309.53 it/s 
+Iter:   259 [##############################]   64 /   64 | B.Loss: 2.48545e-01 | B.perf.: 1854.61 it/s 
+Iter:   260 [##############################]   64 /   64 | B.Loss: 3.98762e-01 | B.perf.: 3267.58 it/s 
+Iter:   261 [##############################]   64 /   64 | B.Loss: 3.23053e-01 | B.perf.: 3638.37 it/s 
+Iter:   262 [##############################]   64 /   64 | B.Loss: 3.00182e-01 | B.perf.: 3539.86 it/s 
+Iter:   263 [##############################]   64 /   64 | B.Loss: 2.42340e-01 | B.perf.: 3662.17 it/s 
+Iter:   264 [##############################]   64 /   64 | B.Loss: 2.31929e-01 | B.perf.: 3280.79 it/s 
+Iter:   265 [##############################]   64 /   64 | B.Loss: 2.27562e-01 | B.perf.: 3440.42 it/s 
+Iter:   266 [##############################]   64 /   64 | B.Loss: 2.29098e-01 | B.perf.: 3291.92 it/s 
+Iter:   267 [##############################]   64 /   64 | B.Loss: 2.32496e-01 | B.perf.: 1931.88 it/s 
+Iter:   268 [##############################]   64 /   64 | B.Loss: 2.17691e-01 | B.perf.: 3695.15 it/s 
+Iter:   269 [##############################]   64 /   64 | B.Loss: 2.29783e-01 | B.perf.: 3109.95 it/s 
+Iter:   270 [##############################]   64 /   64 | B.Loss: 2.66549e-01 | B.perf.: 3346.12 it/s 
+Iter:   271 [##############################]   64 /   64 | B.Loss: 3.45701e-01 | B.perf.: 3853.12 it/s 
+Iter:   272 [##############################]   64 /   64 | B.Loss: 2.61526e-01 | B.perf.: 3310.20 it/s 
+Iter:   273 [##############################]   64 /   64 | B.Loss: 2.43001e-01 | B.perf.: 3830.74 it/s 
+Iter:   274 [##############################]   64 /   64 | B.Loss: 2.27945e-01 | B.perf.: 1992.21 it/s 
+Iter:   275 [##############################]   64 /   64 | B.Loss: 2.79505e-01 | B.perf.: 2313.59 it/s 
+Iter:   276 [##############################]   64 /   64 | B.Loss: 2.68238e-01 | B.perf.: 2577.34 it/s 
+Iter:   277 [##############################]   64 /   64 | B.Loss: 2.38097e-01 | B.perf.: 3306.88 it/s 
+Iter:   278 [##############################]   64 /   64 | B.Loss: 2.28251e-01 | B.perf.: 3172.65 it/s 
+Iter:   279 [##############################]   64 /   64 | B.Loss: 3.47303e-01 | B.perf.: 3754.56 it/s 
+Iter:   280 [##############################]   64 /   64 | B.Loss: 2.55442e-01 | B.perf.: 1530.99 it/s 
+Iter:   281 [##############################]   64 /   64 | B.Loss: 2.82750e-01 | B.perf.: 3497.14 it/s 
+Iter:   282 [##############################]   64 /   64 | B.Loss: 2.15482e-01 | B.perf.: 2485.79 it/s 
+Iter:   283 [##############################]   64 /   64 | B.Loss: 2.16579e-01 | B.perf.: 2636.14 it/s 
+Iter:   284 [##############################]   64 /   64 | B.Loss: 2.40694e-01 | B.perf.: 3512.89 it/s 
+Iter:   285 [##############################]   64 /   64 | B.Loss: 2.72121e-01 | B.perf.: 3275.30 it/s 
+Iter:   286 [##############################]   64 /   64 | B.Loss: 2.88498e-01 | B.perf.: 1817.28 it/s 
+Iter:   287 [##############################]   64 /   64 | B.Loss: 3.21179e-01 | B.perf.: 3487.95 it/s 
+Iter:   288 [##############################]   64 /   64 | B.Loss: 2.49596e-01 | B.perf.: 3050.58 it/s 
+Iter:   289 [##############################]   64 /   64 | B.Loss: 3.15416e-01 | B.perf.: 3636.10 it/s 
+Iter:   290 [##############################]   64 /   64 | B.Loss: 2.50623e-01 | B.perf.: 2467.86 it/s 
+Iter:   291 [##############################]   64 /   64 | B.Loss: 3.41300e-01 | B.perf.: 3893.08 it/s 
+Iter:   292 [##############################]   64 /   64 | B.Loss: 3.21072e-01 | B.perf.: 1998.76 it/s 
+Iter:   293 [##############################]   64 /   64 | B.Loss: 2.42306e-01 | B.perf.: 2829.30 it/s 
+Iter:   294 [##############################]   64 /   64 | B.Loss: 2.42061e-01 | B.perf.: 2370.63 it/s 
+Iter:   295 [##############################]   64 /   64 | B.Loss: 2.38508e-01 | B.perf.: 3425.46 it/s 
+Iter:   296 [##############################]   64 /   64 | B.Loss: 2.46429e-01 | B.perf.: 4090.13 it/s 
+Iter:   297 [##############################]   64 /   64 | B.Loss: 2.14018e-01 | B.perf.: 2200.48 it/s 
+Iter:   298 [##############################]   64 /   64 | B.Loss: 2.54726e-01 | B.perf.: 2331.57 it/s 
+Iter:   299 [##############################]   64 /   64 | B.Loss: 2.17414e-01 | B.perf.: 3100.40 it/s 
+Iter:   300 [##############################]   64 /   64 | B.Loss: 2.79470e-01 | B.perf.: 2847.72 it/s 
+              Average Training perf.: 2738.53 it/s | Mean Loss: 2.52520e-01 | Learning rate: 1.06499e-04 | Weight decay: 0.01000
+Fwd :   300 [##############################]   64 /   64 | B.Loss: 1.71822e-01 | B.perf.: 4674.67 it/s 
+              Average forward perf.: 5323.27 it/s | Mean Loss: 1.89253e-01
+
+   *******  ConfMat  *******   Recall
+          931 |      93 |      90.92%
+           48 |     976 |      95.31%
+Prec.   95.10%    91.30%  Acc  93.12%
+Fwd :   300 [##############################]   64 /   64 | B.Loss: 0.00000e+00 | B.perf.: 7233.38 it/s 
+              Average forward perf.: 6987.01 it/s 
+Iter 300 | 8.80 min | accuracy 93.12% | meilleur checkpoint 300
+
+Iter:   301 [##############################]   64 /   64 | B.Loss: 2.28773e-01 | B.perf.: 2274.53 it/s 
+Iter:   302 [##############################]   64 /   64 | B.Loss: 2.62999e-01 | B.perf.: 3350.90 it/s 
+Iter:   303 [##############################]   64 /   64 | B.Loss: 2.09343e-01 | B.perf.: 3095.69 it/s 
+Iter:   304 [##############################]   64 /   64 | B.Loss: 2.51348e-01 | B.perf.: 3687.59 it/s 
+Iter:   305 [##############################]   64 /   64 | B.Loss: 3.09943e-01 | B.perf.: 2517.78 it/s 
+Iter:   306 [##############################]   64 /   64 | B.Loss: 2.90193e-01 | B.perf.: 2659.88 it/s 
+Iter:   307 [##############################]   64 /   64 | B.Loss: 2.43366e-01 | B.perf.: 3498.60 it/s 
+Iter:   308 [##############################]   64 /   64 | B.Loss: 2.14875e-01 | B.perf.: 2022.63 it/s 
+Iter:   309 [##############################]   64 /   64 | B.Loss: 2.18062e-01 | B.perf.: 3416.74 it/s 
+Iter:   310 [##############################]   64 /   64 | B.Loss: 3.35437e-01 | B.perf.: 3742.89 it/s 
+Iter:   311 [##############################]   64 /   64 | B.Loss: 2.29333e-01 | B.perf.: 3348.15 it/s 
+Iter:   312 [##############################]   64 /   64 | B.Loss: 2.38683e-01 | B.perf.: 2914.39 it/s 
+Iter:   313 [##############################]   64 /   64 | B.Loss: 2.60231e-01 | B.perf.: 2757.87 it/s 
+Iter:   314 [##############################]   64 /   64 | B.Loss: 2.68852e-01 | B.perf.: 3412.76 it/s 
+Iter:   315 [##############################]   64 /   64 | B.Loss: 2.76822e-01 | B.perf.: 3190.76 it/s 
+Iter:   316 [##############################]   64 /   64 | B.Loss: 2.47640e-01 | B.perf.: 3748.48 it/s 
+Iter:   317 [##############################]   64 /   64 | B.Loss: 2.24437e-01 | B.perf.: 3710.78 it/s 
+Iter:   318 [##############################]   64 /   64 | B.Loss: 2.83854e-01 | B.perf.: 2186.02 it/s 
+Iter:   319 [##############################]   64 /   64 | B.Loss: 2.34209e-01 | B.perf.: 3538.21 it/s 
+Iter:   320 [##############################]   64 /   64 | B.Loss: 3.35103e-01 | B.perf.: 3792.25 it/s 
+Iter:   321 [##############################]   64 /   64 | B.Loss: 2.47066e-01 | B.perf.: 2969.88 it/s 
+Iter:   322 [##############################]   64 /   64 | B.Loss: 2.78455e-01 | B.perf.: 3605.59 it/s 
+Iter:   323 [##############################]   64 /   64 | B.Loss: 2.44316e-01 | B.perf.: 2358.82 it/s 
+Iter:   324 [##############################]   64 /   64 | B.Loss: 2.04888e-01 | B.perf.: 3871.54 it/s 
+Iter:   325 [##############################]   64 /   64 | B.Loss: 3.23579e-01 | B.perf.: 3477.26 it/s 
+Iter:   326 [##############################]   64 /   64 | B.Loss: 2.58344e-01 | B.perf.: 3485.05 it/s 
+Iter:   327 [##############################]   64 /   64 | B.Loss: 2.11968e-01 | B.perf.: 3658.57 it/s 
+Iter:   328 [##############################]   64 /   64 | B.Loss: 2.94627e-01 | B.perf.: 2489.18 it/s 
+Iter:   329 [##############################]   64 /   64 | B.Loss: 2.19148e-01 | B.perf.: 2032.90 it/s 
+Iter:   330 [##############################]   64 /   64 | B.Loss: 2.24173e-01 | B.perf.: 2070.93 it/s 
+Iter:   331 [##############################]   64 /   64 | B.Loss: 2.35303e-01 | B.perf.: 3529.55 it/s 
+Iter:   332 [##############################]   64 /   64 | B.Loss: 2.27285e-01 | B.perf.: 3783.39 it/s 
+Iter:   333 [##############################]   64 /   64 | B.Loss: 2.65259e-01 | B.perf.: 3505.27 it/s 
+Iter:   334 [##############################]   64 /   64 | B.Loss: 2.10240e-01 | B.perf.: 3500.35 it/s 
+Iter:   335 [##############################]   64 /   64 | B.Loss: 2.29549e-01 | B.perf.: 2732.35 it/s 
+Iter:   336 [##############################]   64 /   64 | B.Loss: 2.18185e-01 | B.perf.: 1531.67 it/s 
+Iter:   337 [##############################]   64 /   64 | B.Loss: 2.75163e-01 | B.perf.: 3337.28 it/s 
+Iter:   338 [##############################]   64 /   64 | B.Loss: 2.92184e-01 | B.perf.: 3305.46 it/s 
+Iter:   339 [##############################]   64 /   64 | B.Loss: 2.42169e-01 | B.perf.: 3816.37 it/s 
+Iter:   340 [##############################]   64 /   64 | B.Loss: 2.41740e-01 | B.perf.: 3069.64 it/s 
+Iter:   341 [##############################]   64 /   64 | B.Loss: 2.13461e-01 | B.perf.: 3767.51 it/s 
+Iter:   342 [##############################]   64 /   64 | B.Loss: 2.25028e-01 | B.perf.: 3367.14 it/s 
+Iter:   343 [##############################]   64 /   64 | B.Loss: 2.23686e-01 | B.perf.: 3934.79 it/s 
+Iter:   344 [##############################]   64 /   64 | B.Loss: 2.96600e-01 | B.perf.: 2850.33 it/s 
+Iter:   345 [##############################]   64 /   64 | B.Loss: 2.25879e-01 | B.perf.: 3520.80 it/s 
+Iter:   346 [##############################]   64 /   64 | B.Loss: 2.13687e-01 | B.perf.: 3159.99 it/s 
+Iter:   347 [##############################]   64 /   64 | B.Loss: 2.70949e-01 | B.perf.: 2123.43 it/s 
+Iter:   348 [##############################]   64 /   64 | B.Loss: 2.27813e-01 | B.perf.: 3329.35 it/s 
+Iter:   349 [##############################]   64 /   64 | B.Loss: 3.01122e-01 | B.perf.: 2955.27 it/s 
+Iter:   350 [##############################]   64 /   64 | B.Loss: 2.11327e-01 | B.perf.: 1927.58 it/s 
+              Average Training perf.: 2411.99 it/s | Mean Loss: 2.34803e-01 | Learning rate: 6.49705e-05 | Weight decay: 0.01000
+Fwd :   350 [##############################]   64 /   64 | B.Loss: 1.65407e-01 | B.perf.: 4672.42 it/s 
+              Average forward perf.: 4598.10 it/s | Mean Loss: 1.82189e-01
+
+   *******  ConfMat  *******   Recall
+          938 |      86 |      91.60%
+           45 |     979 |      95.61%
+Prec.   95.42%    91.92%  Acc  93.60%
+Fwd :   350 [##############################]   64 /   64 | B.Loss: 0.00000e+00 | B.perf.: 8111.81 it/s 
+              Average forward perf.: 6090.02 it/s 
+Iter 350 | 10.32 min | accuracy 93.60% | meilleur checkpoint 350
+
+Iter:   351 [##############################]   64 /   64 | B.Loss: 2.08236e-01 | B.perf.: 2002.49 it/s 
+Iter:   352 [##############################]   64 /   64 | B.Loss: 2.09001e-01 | B.perf.: 3155.53 it/s 
+Iter:   353 [##############################]   64 /   64 | B.Loss: 2.16990e-01 | B.perf.: 2610.74 it/s 
+Iter:   354 [##############################]   64 /   64 | B.Loss: 2.21351e-01 | B.perf.: 2986.17 it/s 
+Iter:   355 [##############################]   64 /   64 | B.Loss: 2.12242e-01 | B.perf.: 3659.25 it/s 
+Iter:   356 [##############################]   64 /   64 | B.Loss: 2.77047e-01 | B.perf.: 3921.88 it/s 
+Iter:   357 [##############################]   64 /   64 | B.Loss: 2.26522e-01 | B.perf.: 2426.24 it/s 
+Iter:   358 [##############################]   64 /   64 | B.Loss: 2.36777e-01 | B.perf.: 2133.85 it/s 
+Iter:   359 [##############################]   64 /   64 | B.Loss: 2.23633e-01 | B.perf.: 2334.00 it/s 
+Iter:   360 [##############################]   64 /   64 | B.Loss: 2.12902e-01 | B.perf.: 3600.07 it/s 
+Iter:   361 [##############################]   64 /   64 | B.Loss: 2.34511e-01 | B.perf.: 3586.94 it/s 
+Iter:   362 [##############################]   64 /   64 | B.Loss: 2.09208e-01 | B.perf.: 3883.95 it/s 
+Iter:   363 [##############################]   64 /   64 | B.Loss: 2.29704e-01 | B.perf.: 2104.10 it/s 
+Iter:   364 [##############################]   64 /   64 | B.Loss: 2.25159e-01 | B.perf.: 2146.87 it/s 
+Iter:   365 [##############################]   64 /   64 | B.Loss: 2.28904e-01 | B.perf.: 2503.70 it/s 
+Iter:   366 [##############################]   64 /   64 | B.Loss: 2.27260e-01 | B.perf.: 2064.61 it/s 
+Iter:   367 [##############################]   64 /   64 | B.Loss: 2.24757e-01 | B.perf.: 3498.36 it/s 
+Iter:   368 [##############################]   64 /   64 | B.Loss: 2.10277e-01 | B.perf.: 3914.14 it/s 
+Iter:   369 [##############################]   64 /   64 | B.Loss: 2.28269e-01 | B.perf.: 3684.68 it/s 
+Iter:   370 [##############################]   64 /   64 | B.Loss: 2.06449e-01 | B.perf.: 3144.99 it/s 
+Iter:   371 [##############################]   64 /   64 | B.Loss: 2.46974e-01 | B.perf.: 3493.00 it/s 
+Iter:   372 [##############################]   64 /   64 | B.Loss: 2.04783e-01 | B.perf.: 1799.78 it/s 
+Iter:   373 [##############################]   64 /   64 | B.Loss: 2.88556e-01 | B.perf.: 2534.57 it/s 
+Iter:   374 [##############################]   64 /   64 | B.Loss: 2.85299e-01 | B.perf.: 3020.27 it/s 
+Iter:   375 [##############################]   64 /   64 | B.Loss: 2.16827e-01 | B.perf.: 2307.50 it/s 
+Iter:   376 [##############################]   64 /   64 | B.Loss: 2.27459e-01 | B.perf.: 2692.39 it/s 
+Iter:   377 [##############################]   64 /   64 | B.Loss: 2.33502e-01 | B.perf.: 3394.61 it/s 
+Iter:   378 [##############################]   64 /   64 | B.Loss: 2.90973e-01 | B.perf.: 3859.13 it/s 
+Iter:   379 [##############################]   64 /   64 | B.Loss: 2.50254e-01 | B.perf.: 2669.19 it/s 
+Iter:   380 [##############################]   64 /   64 | B.Loss: 2.49044e-01 | B.perf.: 2231.37 it/s 
+Iter:   381 [##############################]   64 /   64 | B.Loss: 2.11222e-01 | B.perf.: 3823.38 it/s 
+Iter:   382 [##############################]   64 /   64 | B.Loss: 2.53993e-01 | B.perf.: 3898.47 it/s 
+Iter:   383 [##############################]   64 /   64 | B.Loss: 2.74869e-01 | B.perf.: 3304.73 it/s 
+Iter:   384 [##############################]   64 /   64 | B.Loss: 2.25244e-01 | B.perf.: 4079.37 it/s 
+Iter:   385 [##############################]   64 /   64 | B.Loss: 2.30892e-01 | B.perf.: 3528.99 it/s 
+Iter:   386 [##############################]   64 /   64 | B.Loss: 2.37292e-01 | B.perf.: 3496.22 it/s 
+Iter:   387 [##############################]   64 /   64 | B.Loss: 2.11897e-01 | B.perf.: 2403.55 it/s 
+Iter:   388 [##############################]   64 /   64 | B.Loss: 2.36313e-01 | B.perf.: 2081.31 it/s 
+Iter:   389 [##############################]   64 /   64 | B.Loss: 2.09229e-01 | B.perf.: 3017.29 it/s 
+Iter:   390 [##############################]   64 /   64 | B.Loss: 2.42802e-01 | B.perf.: 3689.22 it/s 
+Iter:   391 [##############################]   64 /   64 | B.Loss: 2.21415e-01 | B.perf.: 2801.11 it/s 
+Iter:   392 [##############################]   64 /   64 | B.Loss: 2.06964e-01 | B.perf.: 3488.89 it/s 
+Iter:   393 [##############################]   64 /   64 | B.Loss: 2.09398e-01 | B.perf.: 3605.67 it/s 
+Iter:   394 [##############################]   64 /   64 | B.Loss: 2.43827e-01 | B.perf.: 2524.77 it/s 
+Iter:   395 [##############################]   64 /   64 | B.Loss: 2.05678e-01 | B.perf.: 2328.62 it/s 
+Iter:   396 [##############################]   64 /   64 | B.Loss: 2.18966e-01 | B.perf.: 2008.96 it/s 
+Iter:   397 [##############################]   64 /   64 | B.Loss: 2.24996e-01 | B.perf.: 3873.51 it/s 
+Iter:   398 [##############################]   64 /   64 | B.Loss: 2.51653e-01 | B.perf.: 3327.89 it/s 
+Iter:   399 [##############################]   64 /   64 | B.Loss: 2.18799e-01 | B.perf.: 3722.81 it/s 
+Iter:   400 [##############################]   64 /   64 | B.Loss: 2.03568e-01 | B.perf.: 3152.73 it/s 
+              Average Training perf.: 2635.70 it/s | Mean Loss: 2.39467e-01 | Learning rate: 3.19118e-05 | Weight decay: 0.01000
+Fwd :   400 [##############################]   64 /   64 | B.Loss: 2.39319e-01 | B.perf.: 7477.03 it/s 
+              Average forward perf.: 4567.18 it/s | Mean Loss: 1.82706e-01
+
+   *******  ConfMat  *******   Recall
+          935 |      89 |      91.31%
+           40 |     984 |      96.09%
+Prec.   95.90%    91.71%  Acc  93.70%
+Fwd :   400 [##############################]   64 /   64 | B.Loss: 0.00000e+00 | B.perf.: 7519.98 it/s 
+              Average forward perf.: 6576.13 it/s 
+Iter 400 | 11.86 min | accuracy 93.70% | meilleur checkpoint 400
+
+Iter:   401 [##############################]   64 /   64 | B.Loss: 2.77260e-01 | B.perf.: 3896.63 it/s 
+Iter:   402 [##############################]   64 /   64 | B.Loss: 2.05359e-01 | B.perf.: 2461.79 it/s 
+Iter:   403 [##############################]   64 /   64 | B.Loss: 2.07057e-01 | B.perf.: 1904.36 it/s 
+Iter:   404 [##############################]   64 /   64 | B.Loss: 2.15997e-01 | B.perf.: 2516.84 it/s 
+Iter:   405 [##############################]   64 /   64 | B.Loss: 2.07980e-01 | B.perf.: 3143.98 it/s 
+Iter:   406 [##############################]   64 /   64 | B.Loss: 2.27742e-01 | B.perf.: 3306.44 it/s 
+Iter:   407 [##############################]   64 /   64 | B.Loss: 2.22110e-01 | B.perf.: 3836.11 it/s 
+Iter:   408 [##############################]   64 /   64 | B.Loss: 2.86469e-01 | B.perf.: 3506.80 it/s 
+Iter:   409 [##############################]   64 /   64 | B.Loss: 2.10361e-01 | B.perf.: 3937.50 it/s 
+Iter:   410 [##############################]   64 /   64 | B.Loss: 2.42316e-01 | B.perf.: 2130.14 it/s 
+Iter:   411 [##############################]   64 /   64 | B.Loss: 3.38183e-01 | B.perf.: 3636.38 it/s 
+Iter:   412 [##############################]   64 /   64 | B.Loss: 2.36889e-01 | B.perf.: 3508.24 it/s 
+Iter:   413 [##############################]   64 /   64 | B.Loss: 2.44680e-01 | B.perf.: 3662.47 it/s 
+Iter:   414 [##############################]   64 /   64 | B.Loss: 2.28972e-01 | B.perf.: 4099.92 it/s 
+Iter:   415 [##############################]   64 /   64 | B.Loss: 2.18873e-01 | B.perf.: 3984.16 it/s 
+Iter:   416 [##############################]   64 /   64 | B.Loss: 2.19141e-01 | B.perf.: 3135.90 it/s 
+Iter:   417 [##############################]   64 /   64 | B.Loss: 2.12088e-01 | B.perf.: 2131.33 it/s 
+Iter:   418 [##############################]   64 /   64 | B.Loss: 2.82299e-01 | B.perf.: 1903.16 it/s 
+Iter:   419 [##############################]   64 /   64 | B.Loss: 2.10452e-01 | B.perf.: 3477.68 it/s 
+Iter:   420 [##############################]   64 /   64 | B.Loss: 2.44184e-01 | B.perf.: 2466.01 it/s 
+Iter:   421 [##############################]   64 /   64 | B.Loss: 2.09371e-01 | B.perf.: 3786.17 it/s 
+Iter:   422 [##############################]   64 /   64 | B.Loss: 2.12219e-01 | B.perf.: 3152.54 it/s 
+Iter:   423 [##############################]   64 /   64 | B.Loss: 3.14103e-01 | B.perf.: 3787.66 it/s 
+Iter:   424 [##############################]   64 /   64 | B.Loss: 2.06033e-01 | B.perf.: 2535.29 it/s 
+Iter:   425 [##############################]   64 /   64 | B.Loss: 2.05913e-01 | B.perf.: 2344.55 it/s 
+Iter:   426 [##############################]   64 /   64 | B.Loss: 2.12203e-01 | B.perf.: 3331.99 it/s 
+Iter:   427 [##############################]   64 /   64 | B.Loss: 2.03356e-01 | B.perf.: 1670.31 it/s 
+Iter:   428 [##############################]   64 /   64 | B.Loss: 2.32667e-01 | B.perf.: 1838.92 it/s 
+Iter:   429 [##############################]   64 /   64 | B.Loss: 2.08637e-01 | B.perf.: 1555.32 it/s 
+Iter:   430 [##############################]   64 /   64 | B.Loss: 2.23635e-01 | B.perf.: 2333.02 it/s 
+Iter:   431 [##############################]   64 /   64 | B.Loss: 2.11720e-01 | B.perf.: 3131.21 it/s 
+Iter:   432 [##############################]   64 /   64 | B.Loss: 2.12253e-01 | B.perf.: 1850.08 it/s 
+Iter:   433 [##############################]   64 /   64 | B.Loss: 2.26979e-01 | B.perf.: 3887.71 it/s 
+Iter:   434 [##############################]   64 /   64 | B.Loss: 2.32425e-01 | B.perf.: 2652.18 it/s 
+Iter:   435 [##############################]   64 /   64 | B.Loss: 2.05172e-01 | B.perf.: 3853.86 it/s 
+Iter:   436 [##############################]   64 /   64 | B.Loss: 2.12372e-01 | B.perf.: 3783.81 it/s 
+Iter:   437 [##############################]   64 /   64 | B.Loss: 2.25255e-01 | B.perf.: 3786.13 it/s 
+Iter:   438 [##############################]   64 /   64 | B.Loss: 2.33774e-01 | B.perf.: 2102.93 it/s 
+Iter:   439 [##############################]   64 /   64 | B.Loss: 2.80473e-01 | B.perf.: 2157.49 it/s 
+Iter:   440 [##############################]   64 /   64 | B.Loss: 2.35661e-01 | B.perf.: 2324.35 it/s 
+Iter:   441 [##############################]   64 /   64 | B.Loss: 2.21636e-01 | B.perf.: 2427.46 it/s 
+Iter:   442 [##############################]   64 /   64 | B.Loss: 2.18284e-01 | B.perf.: 3116.66 it/s 
+Iter:   443 [##############################]   64 /   64 | B.Loss: 2.03036e-01 | B.perf.: 3885.92 it/s 
+Iter:   444 [##############################]   64 /   64 | B.Loss: 2.16879e-01 | B.perf.: 1616.59 it/s 
+Iter:   445 [##############################]   64 /   64 | B.Loss: 2.05469e-01 | B.perf.: 2756.12 it/s 
+Iter:   446 [##############################]   64 /   64 | B.Loss: 2.23239e-01 | B.perf.: 3567.98 it/s 
+Iter:   447 [##############################]   64 /   64 | B.Loss: 2.32864e-01 | B.perf.: 2019.70 it/s 
+Iter:   448 [##############################]   64 /   64 | B.Loss: 2.36837e-01 | B.perf.: 3161.53 it/s 
+Iter:   449 [##############################]   64 /   64 | B.Loss: 2.35072e-01 | B.perf.: 3553.88 it/s 
+Iter:   450 [##############################]   64 /   64 | B.Loss: 2.10999e-01 | B.perf.: 3219.26 it/s 
+              Average Training perf.: 2660.66 it/s | Mean Loss: 2.26015e-01 | Learning rate: 1.05592e-05 | Weight decay: 0.01000
+Fwd :   450 [##############################]   64 /   64 | B.Loss: 2.50637e-01 | B.perf.: 5196.94 it/s 
+              Average forward perf.: 4066.99 it/s | Mean Loss: 1.77503e-01
+
+   *******  ConfMat  *******   Recall
+          934 |      90 |      91.21%
+           36 |     988 |      96.48%
+Prec.   96.29%    91.65%  Acc  93.85%
+Fwd :   450 [##############################]   64 /   64 | B.Loss: 0.00000e+00 | B.perf.: 8596.68 it/s 
+              Average forward perf.: 5879.62 it/s 
+Iter 450 | 13.45 min | accuracy 93.85% | meilleur checkpoint 450
+
+Iter:   451 [##############################]   64 /   64 | B.Loss: 2.31298e-01 | B.perf.: 3396.99 it/s 
+Iter:   452 [##############################]   64 /   64 | B.Loss: 2.75153e-01 | B.perf.: 2108.87 it/s 
+Iter:   453 [##############################]   64 /   64 | B.Loss: 2.30428e-01 | B.perf.: 2232.11 it/s 
+Iter:   454 [##############################]   64 /   64 | B.Loss: 2.35510e-01 | B.perf.: 2028.17 it/s 
+Iter:   455 [##############################]   64 /   64 | B.Loss: 2.04992e-01 | B.perf.: 1896.99 it/s 
+Iter:   456 [##############################]   64 /   64 | B.Loss: 2.03620e-01 | B.perf.: 2095.26 it/s 
+Iter:   457 [##############################]   64 /   64 | B.Loss: 2.08363e-01 | B.perf.: 3245.63 it/s 
+Iter:   458 [##############################]   64 /   64 | B.Loss: 2.24335e-01 | B.perf.: 3750.84 it/s 
+Iter:   459 [##############################]   64 /   64 | B.Loss: 2.16840e-01 | B.perf.: 3648.77 it/s 
+Iter:   460 [##############################]   64 /   64 | B.Loss: 2.16729e-01 | B.perf.: 2285.35 it/s 
+Iter:   461 [##############################]   64 /   64 | B.Loss: 2.06520e-01 | B.perf.: 2223.63 it/s 
+Iter:   462 [##############################]   64 /   64 | B.Loss: 2.04190e-01 | B.perf.: 1878.31 it/s 
+Iter:   463 [##############################]   64 /   64 | B.Loss: 2.26447e-01 | B.perf.: 4162.68 it/s 
+Iter:   464 [##############################]   64 /   64 | B.Loss: 2.57873e-01 | B.perf.: 3757.65 it/s 
+Iter:   465 [##############################]   64 /   64 | B.Loss: 2.13520e-01 | B.perf.: 3556.72 it/s 
+Iter:   466 [##############################]   64 /   64 | B.Loss: 2.24496e-01 | B.perf.: 2221.98 it/s 
+Iter:   467 [##############################]   64 /   64 | B.Loss: 2.15787e-01 | B.perf.: 2398.62 it/s 
+Iter:   468 [##############################]   64 /   64 | B.Loss: 2.12226e-01 | B.perf.: 1866.58 it/s 
+Iter:   469 [##############################]   64 /   64 | B.Loss: 2.19501e-01 | B.perf.: 3700.09 it/s 
+Iter:   470 [##############################]   64 /   64 | B.Loss: 2.08043e-01 | B.perf.: 2567.35 it/s 
+Iter:   471 [##############################]   64 /   64 | B.Loss: 2.18176e-01 | B.perf.: 4214.61 it/s 
+Iter:   472 [##############################]   64 /   64 | B.Loss: 2.50682e-01 | B.perf.: 4130.22 it/s 
+Iter:   473 [##############################]   64 /   64 | B.Loss: 2.41025e-01 | B.perf.: 3791.05 it/s 
+Iter:   474 [##############################]   64 /   64 | B.Loss: 2.41405e-01 | B.perf.: 2518.75 it/s 
+Iter:   475 [##############################]   64 /   64 | B.Loss: 2.46824e-01 | B.perf.: 2599.85 it/s 
+Iter:   476 [##############################]   64 /   64 | B.Loss: 2.18432e-01 | B.perf.: 2438.17 it/s 
+Iter:   477 [##############################]   64 /   64 | B.Loss: 2.20878e-01 | B.perf.: 3555.25 it/s 
+Iter:   478 [##############################]   64 /   64 | B.Loss: 2.54827e-01 | B.perf.: 3642.84 it/s 
+Iter:   479 [##############################]   64 /   64 | B.Loss: 2.05438e-01 | B.perf.: 3944.48 it/s 
+Iter:   480 [##############################]   64 /   64 | B.Loss: 2.29045e-01 | B.perf.: 4097.52 it/s 
+Iter:   481 [##############################]   64 /   64 | B.Loss: 2.07446e-01 | B.perf.: 2122.16 it/s 
+Iter:   482 [##############################]   64 /   64 | B.Loss: 2.78836e-01 | B.perf.: 2136.50 it/s 
+Iter:   483 [##############################]   64 /   64 | B.Loss: 2.77637e-01 | B.perf.: 3585.59 it/s 
+Iter:   484 [##############################]   64 /   64 | B.Loss: 2.19500e-01 | B.perf.: 4049.16 it/s 
+Iter:   485 [##############################]   64 /   64 | B.Loss: 2.53345e-01 | B.perf.: 3457.52 it/s 
+Iter:   486 [##############################]   64 /   64 | B.Loss: 2.18051e-01 | B.perf.: 3993.20 it/s 
+Iter:   487 [##############################]   64 /   64 | B.Loss: 2.12819e-01 | B.perf.: 2153.26 it/s 
+Iter:   488 [##############################]   64 /   64 | B.Loss: 2.23627e-01 | B.perf.: 3899.11 it/s 
+Iter:   489 [##############################]   64 /   64 | B.Loss: 2.32855e-01 | B.perf.: 2445.13 it/s 
+Iter:   490 [##############################]   64 /   64 | B.Loss: 2.12905e-01 | B.perf.: 3981.56 it/s 
+Iter:   491 [##############################]   64 /   64 | B.Loss: 2.06245e-01 | B.perf.: 2724.16 it/s 
+Iter:   492 [##############################]   64 /   64 | B.Loss: 2.06560e-01 | B.perf.: 3781.98 it/s 
+Iter:   493 [##############################]   64 /   64 | B.Loss: 2.12976e-01 | B.perf.: 3710.78 it/s 
+Iter:   494 [##############################]   64 /   64 | B.Loss: 2.05964e-01 | B.perf.: 1901.77 it/s 
+Iter:   495 [##############################]   64 /   64 | B.Loss: 2.08761e-01 | B.perf.: 3991.79 it/s 
+Iter:   496 [##############################]   64 /   64 | B.Loss: 2.25057e-01 | B.perf.: 1979.83 it/s 
+Iter:   497 [##############################]   64 /   64 | B.Loss: 2.85828e-01 | B.perf.: 2742.78 it/s 
+Iter:   498 [##############################]   64 /   64 | B.Loss: 2.17848e-01 | B.perf.: 2353.04 it/s 
+Iter:   499 [##############################]   64 /   64 | B.Loss: 2.04328e-01 | B.perf.: 3161.54 it/s 
+Iter:   500 [##############################]   64 /   64 | B.Loss: 2.42507e-01 | B.perf.: 3731.76 it/s 
+              Average Training perf.: 2698.00 it/s | Mean Loss: 2.22084e-01 | Learning rate: 3.00293e-06 | Weight decay: 0.01000
+Fwd :   500 [##############################]   64 /   64 | B.Loss: 2.47223e-01 | B.perf.: 4143.74 it/s 
+              Average forward perf.: 4335.45 it/s | Mean Loss: 1.72559e-01
+
+   *******  ConfMat  *******   Recall
+          949 |      75 |      92.68%
+           42 |     982 |      95.90%
+Prec.   95.76%    92.90%  Acc  94.29%
+Fwd :   500 [##############################]   64 /   64 | B.Loss: 0.00000e+00 | B.perf.: 8912.66 it/s 
+              Average forward perf.: 6558.72 it/s 
+Iter 500 | 15.09 min | accuracy 94.29% | meilleur checkpoint 500
+Temps total d’entraînement : 15.09 min. Log : /content/config5_t4_dx_24c07/training.csv
+
+#### eval log
+ Network (id: 0) initialized with : 
+Batch size: 128 
+Using CUDA (FP16C_FP32A) compute method 
+Inference only: 1
+
+Dynamic load ENABLED
+
+Setting test set
+
+L:0 - CREATING INPUT LAYER ...
+      Input branch: 0, Shape:96x96x1x3
+Fwd :   500 [##############################]   16 /   16 | B.Loss: 0.00000e+00 | B.perf.: 9542.26 it/s 
+              Average forward perf.: 9508.03 it/s 
+Fwd :   500 [##############################]   16 /   16 | B.Loss: 0.00000e+00 | B.perf.: 14775.80 it/s 
+              Average forward perf.: 14186.85 it/s 
+Fwd :   500 [##############################]   16 /   16 | B.Loss: 0.00000e+00 | B.perf.: 15687.07 it/s 
+              Average forward perf.: 15169.20 it/s 
+Fwd :   500 [##############################]   16 /   16 | B.Loss: 0.00000e+00 | B.perf.: 14762.93 it/s 
+              Average forward perf.: 15171.31 it/s 
+Fwd :   500 [##############################]   16 /   16 | B.Loss: 0.00000e+00 | B.perf.: 15748.71 it/s 
+              Average forward perf.: 15315.77 it/s 
+Fwd :   500 [##############################]   16 /   16 | B.Loss: 0.00000e+00 | B.perf.: 15669.38 it/s 
+              Average forward perf.: 14087.62 it/s 
+2 048 images : [145.4 136.1 136.1 134.7 146. ] ms | médiane : 136.1 ms | budget < 300 ms : True
+Accuracy : 94.29 %
