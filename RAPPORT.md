@@ -97,7 +97,7 @@ La différence apparaît surtout à droite du graphique. À N = 3 840, v6 attein
 
 ### Q28–34 · OpenMP et énergie
 
-**Q28–29.** Chaque thread reçoit des blocs distincts de C et garde toutes leurs contributions sur K. Deux threads qui feraient `C[i,j] += …` en même temps pourraient perdre une contribution. Dans la campagne des figures, à deux threads, l’axe M donne **73,4 ms** contre **77,3 ms** sur N. Sur M, `static,1` donne **66,5 ms**, `guided,2` **67,1 ms** et `dynamic,1` **69,1 ms**. Le travail est assez régulier pour une répartition statique. Une autre campagne favorise N avec `static,4`. Le classement varie donc entre les deux séries.
+**Q28–29.** Chaque thread reçoit des blocs distincts de C et garde toutes leurs contributions sur K. Deux threads qui feraient `C[i,j] += …` en même temps pourraient perdre une contribution. À N = 1 920 et avec deux threads, l’axe M donne **73,4 ms** contre **77,3 ms** sur N. Sur M, `static,1` donne **66,5 ms**, `guided,2` **67,1 ms** et `dynamic,1` **69,1 ms**. Le travail est assez régulier pour une répartition statique. Une autre campagne favorise N avec `static,4`. Le classement varie donc entre les deux séries.
 
 **Q30–32.** Avec M, `static,1` et les blocs 64/120/480, le débit passe de **109 GFLOP/s à 1 thread** à **444 à 8**, puis **600 à 20**. À 24 threads il retombe à **476**. Les deux courbes de speedup se superposent presque parce que les références sont très proches **(130,54 ms sans OpenMP et 129,96 ms avec un thread)**. À 20 threads, les gains correspondants sont **5,53× et 5,51×**.
 
@@ -109,7 +109,7 @@ De 1 à 8 threads, quatre fois plus de produits sont calculés par seconde. Entr
 
 Un doublement idéal du débit à chaque doublement du nombre de threads donnerait une droite de pente 1. Ici, le gain atteint environ 4× à 8 threads, puis 5,5× à 20. Les deux courbes ont la même forme parce que seul le temps de référence change.
 
-**Q33.** Si la puissance double, `E(12)/E(1) = 2 × t(12)/t(1)`. Dans la campagne consignée dans les notes, ce rapport vaut **0,645 pour v6** et **0,647 pour OpenBLAS**. Cela représente une économie d’environ **35 % d’énergie** dans les deux cas. Le gain de temps compense le doublement supposé de la puissance. La campagne de la figure Q30, avec d’autres réglages, donne **0,457 pour v6**.
+**Q33.** Si la puissance double, `E(12)/E(1) = 2 × t(12)/t(1)`. Avec une répartition des blocs de v6 sur N en `static,4` et des blocs de 64/120/240, le rapport estimé vaut **0,645 pour v6** et **0,647 pour OpenBLAS**. Cela représente une économie d’environ **35 % d’énergie** dans les deux cas. Le gain de temps compense le doublement supposé de la puissance. En répartissant les blocs sur M avec le réglage `static,1` et des blocs de 64/120/480, le même calcul donne **0,457 pour v6**.
 
 **Q34.** À **N = 9 600**, le wattmètre donne 20 W au repos. En charge, les relevés sont les suivants.
 
@@ -140,7 +140,7 @@ Un doublement idéal du débit à chaque doublement du nombre de threads donnera
 
 Le GPU atteint son pic à N = 2 048, le CPU à N = 4 096. Au-delà, les débits fluctuent puis se stabilisent à des niveaux distincts. Agrandir les matrices fournit d’abord plus de travail parallèle. Une fois les unités de calcul bien occupées, ajouter du travail augmente surtout le temps total.
 
-**Q37.** Avec la puissance turbo maximale publiée par Intel pour le i7-12700 (**180 W**), le CPU atteint au mieux **857/180 = 4,76 GFLOP/J**, à 4 096. Avec les **70 W** du sujet, le T4 en FP32 atteint **7 377/70 = 105,4 GFLOP/J**, à 2 048. Le rapport estimé vaut **22×**. Ces chiffres utilisent une puissance constante sur toute la courbe.
+**Q37.** Avec la puissance turbo maximale publiée par Intel pour le i7-12700 (**180 W**), le CPU atteint au mieux **857/180 = 4,76 GFLOP/J**, à 4 096. En supposant une puissance de **70 W** pour le GPU, le T4 en FP32 atteint **7 377/70 = 105,4 GFLOP/J**, à 2 048. Le rapport estimé vaut **22×**. Ces chiffres utilisent une puissance constante sur toute la courbe.
 
 **Q38.** Chaque thread du kernel naïf calcule une seule case de C et relit deux valeurs à chaque tour sur K. Son meilleur résultat relatif est **1,09 % de cuBLAS**, à 4 096. À cette taille, même OpenBLAS sur un seul thread le devance.
 
@@ -156,9 +156,9 @@ Les tuiles et les Tensor Cores apportent deux gains distincts. Les tuiles rédui
 
 ## Partie 2 — Reconnaître les chats et les chiens
 
-Tous les modèles utilisent le découpage ASIRRA du TP. L’évaluation porte sur les mêmes 2 048 images. L’objectif est d’obtenir la meilleure accuracy **en moins de 300 ms sur le T4**. Les essais CPU avaient un budget local de 5 s.
+Les réseaux sont entraînés avec CIANNA pour distinguer les chats des chiens sur les photos du jeu ASIRRA. Chaque modèle est évalué sur les mêmes 2 048 images. Le but est de classer correctement le plus d’images possible et de traiter le lot entier **en moins de 300 ms sur le T4**. Sur le CPU de la salle, la limite est de 5 s.
 
-| Essai | Idée testée | Accuracy observée | Inférence |
+| Essai | Idée testée | Images bien classées | Inférence |
 |---|---|---:|---:|
 | 1 · CPU (modèle du cours) | Images 64 × 64, deux convolutions puis trois couches denses | 83,89 % à 500 itérations | 0,70 s |
 | 2 · CPU | Cinq convolutions, augmentations plus fortes et dropout réduit | **92,92 %** à 500 | 3,63 s |
@@ -181,6 +181,6 @@ Tous les modèles utilisent le découpage ASIRRA du TP. L’évaluation porte su
 
 6. **Config 6 — utiliser la marge de temps pour augmenter la résolution.** À 136,1 ms, la config 5 dispose encore de 163,9 ms avant la limite. Passer de 96 × 96 à 128 × 128 conserve davantage de détails de l’image d’origine avec les mêmes couches et les mêmes réglages d’entraînement. À 50 itérations, la config 6 est derrière la 5 (83,79 % contre 86,18 %). À 200, elle passe devant (93,60 % contre 89,40 %). Juger la résolution sur le premier checkpoint aurait donc conduit au choix inverse. La précision atteint 95,56 % à l’itération 450 puis 95,51 % à 500. Cela représente une seule image bien classée de moins sur 2 048. Le checkpoint 450 est donc retenu, mais cet écart donne peu d’indices de surapprentissage marqué.
 
-**Pistes pour les configs 7 et 8.** Le journal intitulé « training 7 » reprend les mesures de la config 6. Deux essais permettraient d’isoler l’effet de chaque réglage en repartant de la config 6. Le premier appliquerait les rotations et changements d’échelle à 60 % des images d’entraînement au lieu de 30 %, pour tester la robustesse aux variations de cadrage. Le second garderait la probabilité de 30 % et diviserait le taux d’apprentissage maximal par deux, pour tester si des mises à jour plus petites améliorent la précision en 500 itérations.
+**Deux essais possibles à partir de la config 6.** Pour la config 7, les rotations et les changements d’échelle seraient appliqués à 60 % des images d’entraînement au lieu de 30 %. L’objectif serait de mieux reconnaître l’animal quand son orientation ou son cadrage change, sans alourdir l’inférence. La config 8 garderait les augmentations à 30 % et réduirait uniquement le taux d’apprentissage maximal de 0,0003 à 0,00015. Comparer la précision aux mêmes itérations montrerait si ces mises à jour plus petites améliorent le résultat ou ralentissent simplement l’apprentissage.
 
 **Conclusion sur le CNN.** Le modèle retenu est la **config 6 au checkpoint 450**. Passer de 96 × 96 à 128 × 128 donne un gain de **1,27 point** par rapport à la config 5 pour **108,8 ms** de plus. Ce checkpoint atteint **95,56 % de bonnes prédictions sur 2 048 images en 244,9 ms**, avec **55,1 ms de marge** sur le T4.
