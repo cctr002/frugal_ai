@@ -308,4 +308,21 @@ Les réseaux sont entraînés avec CIANNA pour distinguer les chats des chiens s
 
 \textbf{Conclusion sur le CNN.} Le modèle retenu est la \textbf{config 6 au checkpoint 450}. Passer de 96 × 96 à 128 × 128 donne un gain de \textbf{1,27 point} par rapport à la config 5 pour \textbf{108,8 ms} de plus. Ce checkpoint atteint \textbf{95,56 \% de bonnes prédictions sur 2 048 images en 244,9 ms}, avec \textbf{55,1 ms de marge} sur le T4.
 
+Le fichier de poids de l’itération 450 n’a pas été conservé. Les résultats ci-dessus ont été mesurés sur ce modèle. L’annexe permet de répéter le protocole. Le tirage des images, les augmentations et l’initialisation des poids étant aléatoires, un nouvel entraînement peut donner un autre meilleur checkpoint.
+
+\clearpage
+\section*{\sffamily Annexe — Reproduire la configuration 6 sur T4}
+
+\textbf{1. Préparer la session.} Extraire l’archive de rendu et ouvrir le notebook \texttt{partie2/config6\_T4.ipynb} dans Google Colab. Choisir un GPU T4, puis exécuter les cellules dans l’ordre, dans la même session. Les premières cellules compilent CIANNA (branche \texttt{experimental}, CUDA, option \texttt{USE\_BLAS=off}) et téléchargent ASIRRA en 128 × 128. Le notebook gère les données et les poids du début à la fin.
+
+\textbf{2. Préparer les images.} Sur les 12 500 images de chaque classe, réserver les 1 024 dernières pour la validation et l’évaluation finale. Pour l’entraînement, tirer à chaque fois une classe puis une image parmi les 11 476 restantes de cette classe. Aplatir les trois canaux séparément et normaliser chaque pixel par (valeur − 100)/155. Les cibles d’entraînement valent 0,95 pour la bonne classe et 0,05 pour l’autre.
+
+\textbf{3. Appliquer les augmentations.} Pendant l’entraînement, après redimensionnement, faire varier luminosité, contraste et saturation entre 0,85 et 1,15, et la teinte jusqu’à ±0,05 (probabilité 80 \%). Appliquer ensuite le passage en gris (2 \%), le miroir horizontal (50 \%), puis une transformation affine (30 \%, échelle de 0,9 à 1,1 et rotation de −10° à +10°). À l’évaluation, garder uniquement le redimensionnement et la normalisation.
+
+\textbf{4. Entraîner le réseau.} La première convolution utilise 24 filtres de 4 × 4 avec un pas de 2. Trois max-poolings de 2 × 2 précèdent respectivement deux convolutions à 48 filtres, deux à 96 et une à 128, toutes de 3 × 3. Ces couches utilisent une ReLU de pente négative 0,05, saturée à 64. Terminer par deux filtres linéaires de 1 × 1, une moyenne globale et un softmax. Entraîner en FP32 pendant 500 itérations de 2 048 images, par lots de 32. Utiliser RMSProp avec momentum 0,9 et décroissance des poids découplée de 0,01. Le taux d’apprentissage monte linéairement pendant les 10 premières itérations, entre 0,000003 et 0,0003, puis décroît en cosinus.
+
+\textbf{5. Sélectionner les poids.} Toutes les 50 itérations, calculer le taux de bonnes réponses sur les 2 048 images réservées. Sauvegarder les poids uniquement si le score dépasse strictement le meilleur précédent. La cellule écrit \texttt{config6\_best.dat} et \texttt{training.csv} dans \texttt{/content/config6}. Télécharger ces deux fichiers avant de fermer la session pour conserver le nouvel essai.
+
+\textbf{6. Mesurer l’inférence.} La dernière cellule recharge les meilleurs poids de cet entraînement. Utiliser des lots de 128 en précision mixte (calcul FP16, accumulation FP32). Un premier passage sur les 2 048 images chauffe le GPU et fournit les prédictions pour le taux de bonnes réponses. Chronométrer ensuite cinq passages complets sans rapatrier les prédictions, en synchronisant le GPU avant la série et à la fin de chaque passage. Retenir la médiane. Lors de l’essai initial, les temps étaient de 243,7, 248,0, 244,0, 244,9 et 248,0 ms, soit 244,9 ms pour les 2 048 images.
+
 \end{document}
