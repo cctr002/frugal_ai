@@ -160,7 +160,7 @@ Tous les modèles utilisent le découpage ASIRRA du TP. L’évaluation porte su
 
 | Essai | Idée testée | Accuracy observée | Inférence |
 |---|---|---:|---:|
-| 1 · CPU | Images 64 × 64, deux convolutions puis trois couches denses | 83,89 % à 500 itérations | 0,70 s |
+| 1 · CPU (modèle du cours) | Images 64 × 64, deux convolutions puis trois couches denses | 83,89 % à 500 itérations | 0,70 s |
 | 2 · CPU | Cinq convolutions, augmentations plus fortes et dropout réduit | **92,92 %** à 500 | 3,63 s |
 | 3 · CPU | Plus de convolutions sur de petites cartes, moyenne globale et aucune couche dense | **90,48 % au checkpoint 100**, entraînement arrêté | 2,70 s |
 | 4 · T4 | Images 96 × 96, première convolution de stride 2, entraînement et inférence en précision mixte | **89,70 % à 150** en validation, **50,00 % à 500** | **154,5 ms** au checkpoint 500 |
@@ -169,7 +169,7 @@ Tous les modèles utilisent le découpage ASIRRA du TP. L’évaluation porte su
 
 ### Pourquoi ces configurations ?
 
-1. **Config 1 — établir une référence sur CPU.** Deux convolutions sur des images de 64 × 64 donnent un premier score à faible coût. En fin d’entraînement, la perte continue de baisser sur les images d’entraînement alors que la précision en validation plafonne autour de 84 %. L’inférence prend seulement 0,70 s sur les 5 s disponibles. Il reste donc du temps pour extraire davantage de motifs dans les images.
+1. **Config 1 — référence fournie par le cours.** Ce modèle sert de point de comparaison pour les essais suivants sur CPU. En fin d’entraînement, la perte continue de baisser sur les images d’entraînement alors que la précision en validation plafonne autour de 84 %. L’inférence prend seulement 0,70 s sur les 5 s disponibles. Il reste donc du temps pour extraire davantage de motifs dans les images.
 
 2. **Config 2 — mieux exploiter les mêmes images.** Passer de deux à cinq convolutions permet de combiner des motifs simples en formes plus complexes. Les variations de couleur, d’angle et d’échelle visent à mieux reconnaître un animal quand la photo change. Le dropout des deux couches denses passe de 80 et 50 % à 50 et 30 % pour garder davantage de neurones actifs pendant l’apprentissage. L’ensemble fait gagner 9,03 points et tient en 3,63 s. Plusieurs réglages ayant changé ensemble, leur contribution individuelle reste inconnue.
 
