@@ -2296,6 +2296,628 @@ Inference time: 3629.309592 ms (564 ips)
 Accuracy: 92.919922, Error rate: 7.080078
 
 ### training 3
-#### training config
+
+#### training config
+%bash
+
+python3 - <<'EOF'
+
+from pathlib import Path
+from helper import *
+
+run_name = os.environ["FRUGAL_AI_RUN"]
+if run_name not in ("v3_gap", "v3_wide", "v3_spatial"):
+  raise ValueError("Sélectionner une variante v3 pour lancer un entraînement.")
+run_dir = Path("runs") / run_name
+
+raw_image_size = 64
+image_size = 64
+nb_images_per_iter = 4096
+
+load_iter = 0
+
+# Data augmentation
+train_transform = A.Compose([
+  A.Resize(height=image_size, width=image_size, interpolation=1, p=1.0),
+  A.ColorJitter(brightness=(0.85,1.15), contrast=(0.85,1.15),
+                saturation=(0.85,1.15), hue=0.05, p=0.8),
+  A.ToGray(p=0.02),
+  A.HorizontalFlip(p=0.5),
+  A.Affine(scale=(0.9,1.1), rotate=(-10,10),
+           interpolation=1, p=0.3),
+])
+
+val_transform = A.Compose([
+    A.Resize(height=image_size, width=image_size, interpolation=1),
+])
+
+def data_augm():
+  input_data, targets = create_augmented_batch(train_transform)
+  cnn.delete_dataset("TRAIN_buf", silent=1)
+  cnn.create_dataset("TRAIN_buf", nb_images_per_iter,
+                     input_data[:,:], targets[:,:], silent=1)
+  return
+
+cnn.init(b_size=32, optimizer=cnn.rms_prop(momentum=0.9), wema=0, dynamic_load=1,
+  comp_meth='C_BLAS', mixed_precision="FP32C_FP32A")
+
+data_prep(nb_images_per_iter, raw_image_size, image_size)
+
+input_val, targets_val = create_validation_set(val_transform)
+cnn.create_dataset("VALID", 2048, input_val[:,:], targets_val[:,:])
+cnn.create_dataset("TEST", 2048, input_val[:,:], targets_val[:,:])
+
+input_data, targets = create_augmented_batch(train_transform)
+cnn.create_dataset("TRAIN", nb_images_per_iter, input_data[:,:], targets[:,:])
+
+run_dir.mkdir(parents=True, exist_ok=True)
+os.chdir(run_dir)
+
+a_relu = cnn.relu(leaking=0.05, saturation=640000.0)
+
+if(load_iter > 0):
+  cnn.input(spatial_shape=[image_size,image_size,1], nb_features=3)
+  cnn.load("net_save/net0_s%04d.dat"%load_iter, load_iter, nb_skip_layers=1, bin=1)
+else:
+  cnn.input(spatial_shape=[image_size,image_size,1], nb_features=3)
+
+  # 64 × 64
+  cnn.conv(f_size=(3,3), nb_filters=16, padding=(1,1), activation=a_relu)
+  cnn.pool(p_size=(2,2), p_type="MAX")
+
+  # 32 × 32 puis 16 × 16
+  for channels in (24, 48):
+    cnn.conv(f_size=(3,3), nb_filters=channels, padding=(1,1), activation=a_relu)
+    cnn.conv(f_size=(3,3), nb_filters=channels, padding=(1,1), activation=a_relu)
+    cnn.pool(p_size=(2,2exist_ok=True)
+os.chdir(run_dir)
+
+a_relu = cnn.relu(leaking=0.05, saturation=640000.0)
+
+if(load_iter > 0):
+  cnn.input(spatial_shape=[image_size,image_size,1], nb_features=3)
+  cnn.load("net_save/net0_s%04d.dat"%load_iter, load_iter, nb_skip_layers=1, bin=1)
+else:), p_type="MAX")
+
+  # 8 × 8
+  channels = 128 if run_name == "v3_wide" else 96
+  cnn.conv(f_size=(3,3), nb_filters=channels, padding=(1,1), activation=a_relu)
+  cnn.conv(f_size=(3,3), nb_filters=channels, padding=(1,1), activation=a_relu)
+
+  if run_name == "v3_spatial":
+    cnn.dense(nb_neurons=64, activation=a_relu, drop_rate=0.3)
+    cnn.dense(nb_neurons=2, strict_size=1, activation="SMAX")
+  else:
+    cnn.conv(f_size=(1,1), nb_filters=2, activation="LIN")
+    cnn.pool(p_size=(1,1), p_type="AVG", p_global=1, activation="SMAX")
+
+
+warmup = 10
+cycle_length = 500
+nb_cycles = 1
+
+l_r_max = 3e-4
+l_r_min = 3e-6
+
+nb_iter_per_augm = 1
+if(nb_iter_per_augm > 1):
+  shuffle_frequency = 1
+else:
+  shuffle_frequency = 0
+
+for i in range(load_iter, nb_cycles*cycle_length):
+
+  if((i+1) % nb_iter_per_augm == 0):
+    t = Thread(target=data_augm)
+    t.start()
+
+
+ 
+  if(i < warmup):
+    l_r = l_r_min + (l_r_max - l_r_min) * min(i/warmup,1.0)
+  else:
+    cycle_id = i//cycle_length
+    in_cycle_progress = (i%cycle_length)/cycle_length
+    l_r = l_r_min + 0.5*(l_r_max*0.8**cycle_id - l_r_min)*(1 + np.cos(np.pi*in_cycle_progress))
+
+  cnn.train(nb_iter=1, learning_rate=l_r, weight_decay=0.01, decoupled_wdecay=1,
+    confmat=1, control_interv=50, save_every=100, save_optim_every=100,
+    save_bin=1, TC_scale_factor=128.0, shuffle_every=shuffle_frequency)
+
+  if(i == 0):
+    cnn.perf_eval()
+
+  if((i+1) % nb_iter_per_augm == 0):
+    t.join()
+    cnn.swap_data_buffers("TRAIN")
+
+free_data_helper()
+
+EOF
 #### training log
+
+                  ..:^~!?JY5PB~                                                                                         
+          J5PGB#&&&&&#BGP55YY#&#!                                                                                       
+          &GGB##&&&@@@@@&#PJ?B#&B                                                                                       
+         .&#&@@@@@@@@@@@@@@@B##&G                                                                                       
+       ^G@@@@BJ^.   .~?P&@@@@@&&G                                                                                       
+     &&@@@B^   :!???^^..:7&@@@@&G      .~~~         :~~:         ~~~^        ~~~    ~~~^        ~~~         ^~~.        
+   .B@@@&^  !#@@@@@@@@&?^~J&@@@@B ^    !@@@.       :@@@@^       .@@@@G      .@@@:  .@@@@P      .@@@:       ~@@@@.       
+  .&@@@#  .J@@@#GP55PB&@&JJ5@@@@B ^G   !@@@.       &@@@@@.      .@@@@@&:     @@@:  .@@@@@&:    .@@@.      :@@@@@&       
+  &@@@@.  ?@@&Y?JJJJJJJP@5JY@@@@B ^@:  !@@@       #@@PY@@&      .@@@P@@@7    @@@:  .@@@P@@@7   .@@@.      &@@JG@@B      
+ :@@@@#  .@@@YJJJJJJJJJJGY?#@@@@B 5@!  !@@@      P@@#  G@@B     .@@@.:&@@G   @@@:  .@@@.:&@@P  .@@@.     #@@P  &@@5     
+ ~@Y&@#  .@@@P?JJJJJJJJJ?J#@@@@@G.@@~  !@@@     ?@@@:  .&@@5    .@@@.  G@@&. @@@:  .@@@.  G@@&. @@@.    P@@&.  :@@@7    
+ .@:#@@.  B@@@P5JJJJJJJ5B@@@@@@&#&@&   !@@@    ~@@@@@@@@@@@@7   .@@@.   ?@@@J@@@:  .@@@.   ?@@@J@@@.   ?@@@@@@@@@@@@^   
+  5^7@@#   G@@@&&&###&@@@@@@&&B@@@@^   !@@@   .@@@Y??????J@@@^  .@@@.    :&@@@@@:  .@@@.    :&@@@@@.  ~@@@J??????5@@@.  
+   : B@@&~  ^B@@@@@@@@@@&GPYJ#@@@@^    !@@@. .@@@J        7@@@: .@@@:      G@@@@:  .@@@.      G@@@@: :@@@!        5@@&. 
+      G@@@&?. .~5B&GJ7^:::7B@@@@&      .YJ?  ^YJ7          !JY~  ?JJ        !YJJ    JJJ        !YJJ  !YY!          ?JY^ 
+       7&@@@@&G?~^^~!Y5G&@@@@@&&G                                                                                       
+         ?@@@@@@@@@@@@@@@&#GY##&G                                                                                       
+          &PB&@@@@&&##BGP5J??B#&B                                                                                       
+          Y55PGB##&&&#BGPP55Y#&#!                                                                                       
+                 ...:^~!?JY5PB~                                                                                         
+
+#######################################################################
+     CIANNA V-1.1.0.4 /!\ EXPERIMENTAL build /!\ (11/2026), by D.Cornu
+#######################################################################
+
+ WARNING: Number of OpenMP threads likely not set by user.
+ OMP_MAX_THREADS set to 10  (half detected threads)
+ We recommend investigating manual configuration through environment variables
+
+ WARNING: Number of OpenBLAS threads likely not set by user.
+ OPENBLAS_MAX_THREADS set to 10  (half detected threads)
+ We recommend investigating manual configuration through environment variables
+
+RMSprop optimizer set with alpha: 0.9900, momentum: 0.9000, eps: 1e-08, centered: 0
+Network (id: 0) initialized with : 
+Batch size: 32 
+Using BLAS compute method 
+Inference only: 0
+
+Setting valid set
+
+Setting test set
+
+Setting train set
+
+L:0 - CREATING INPUT LAYER ...
+      Input branch: 0, Shape:64x64x1x3
+L:1 - CREATING CONVOLUTIONAL LAYER ...
+      Xavier Normal weight initialization
+      Input: 64x64x1x3, Output: 64x64x1x16 
+      Nb_groups: 1, Filters: 16f 3x3x1x3,
+      Stride: 1:1:1, padding: 1:1:0, int_padding: 0:0:0,  
+      Activation: RELU_S640000.00_L0.05, Bias: 0.10, dropout rate: 0.00
+      Nb. weights: 448, Approx layer RAM/VRAM requirement: 106 MB
+L:2 - CREATING POOL LAYER ...
+      Input: 64x64x1x16, Output: 32x32x1x16
+      P. size: 2x2x1, Stride: 2x2x1, padding: 0x0x0 
+      Pool type: MAX, Global: 0, Activation: LIN, dropout rate: 0.00
+      Approx layer RAM/VRAM requirement: 6 MB
+L:3 - CREATING CONVOLUTIONAL LAYER ...
+      Xavier Normal weight initialization
+      Input: 32x32x1x16, Output: 32x32x1x24 
+      Nb_groups: 1, Filters: 24f 3x3x1x16,
+      Stride: 1:1:1, padding: 1:1:0, int_padding: 0:0:0,  
+      Activation: RELU_S640000.00_L0.05, Bias: 0.10, dropout rate: 0.00
+      Nb. weights: 3480, Approx layer RAM/VRAM requirement: 53 MB
+L:4 - CREATING CONVOLUTIONAL LAYER ...
+      Xavier Normal weight initialization
+      Input: 32x32x1x24, Output: 32x32x1x24 
+      Nb_groups: 1, Filters: 24f 3x3x1x24,
+      Stride: 1:1:1, padding: 1:1:0, int_padding: 0:0:0,  
+      Activation: RELU_S640000.00_L0.05, Bias: 0.10, dropout rate: 0.00
+      Nb. weights: 5208, Approx layer RAM/VRAM requirement: 63 MB
+L:5 - CREATING POOL LAYER ...
+      Input: 32x32x1x24, Output: 16x16x1x24
+      P. size: 2x2x1, Stride: 2x2x1, padding: 0x0x0 
+      Pool type: MAX, Global: 0, Activation: LIN, dropout rate: 0.00
+      Approx layer RAM/VRAM requirement: 2 MB
+L:6 - CREATING CONVOLUTIONAL LAYER ...
+      Xavier Normal weight initialization
+      Input: 16x16x1x24, Output: 16x16x1x48 
+      Nb_groups: 1, Filters: 48f 3x3x1x24,
+      Stride: 1:1:1, padding: 1:1:0, int_padding: 0:0:0,  
+      Activation: RELU_S640000.00_L0.05, Bias: 0.10, dropout rate: 0.00
+      Nb. weights: 10416, Approx layer RAM/VRAM requirement: 24 MB
+L:7 - CREATING CONVOLUTIONAL LAYER ...
+      Xavier Normal weight initialization
+      Input: 16x16x1x48, Output: 16x16x1x48 
+      Nb_groups: 1, Filters: 48f 3x3x1x48,
+      Stride: 1:1:1, padding: 1:1:0, int_padding: 0:0:0,  
+      Activation: RELU_S640000.00_L0.05, Bias: 0.10, dropout rate: 0.00
+      Nb. weights: 20784, Approx layer RAM/VRAM requirement: 31 MB
+L:8 - CREATING POOL LAYER ...
+      Input: 16x16x1x48, Output: 8x8x1x48
+      P. size: 2x2x1, Stride: 2x2x1, padding: 0x0x0 
+      Pool type: MAX, Global: 0, Activation: LIN, dropout rate: 0.00
+      Approx layer RAM/VRAM requirement: 1 MB
+L:9 - CREATING CONVOLUTIONAL LAYER ...
+      Xavier Normal weight initialization
+      Input: 8x8x1x48, Output: 8x8x1x96 
+      Nb_groups: 1, Filters: 96f 3x3x1x48,
+      Stride: 1:1:1, padding: 1:1:0, int_padding: 0:0:0,  
+      Activation: RELU_S640000.00_L0.05, Bias: 0.10, dropout rate: 0.00
+      Nb. weights: 41568, Approx layer RAM/VRAM requirement: 12 MB
+L:10 - CREATING CONVOLUTIONAL LAYER ...
+      Xavier Normal weight initialization
+      Input: 8x8x1x96, Output: 8x8x1x96 
+      Nb_groups: 1, Filters: 96f 3x3x1x96,
+      Stride: 1:1:1, padding: 1:1:0, int_padding: 0:0:0,  
+      Activation: RELU_S640000.00_L0.05, Bias: 0.10, dropout rate: 0.00
+      Nb. weights: 83040, Approx layer RAM/VRAM requirement: 16 MB
+L:11 - CREATING CONVOLUTIONAL LAYER ...
+      Xavier Normal weight initialization
+      Input: 8x8x1x96, Output: 8x8x1x2 
+      Nb_groups: 1, Filters: 2f 1x1x1x96,
+      Stride: 1:1:1, padding: 0:0:0, int_padding: 0:0:0,  
+      Activation: LIN, Bias: 0.50, dropout rate: 0.00
+      Nb. weights: 194, Approx layer RAM/VRAM requirement: 0 MB
+L:12 - CREATING POOL LAYER ...
+      Input: 8x8x1x2, Output: 1x1x1x2
+      P. size: 8x8x1, Stride: 8x8x1, padding: 0x0x0 
+      Pool type: AVG, Global: 1, Activation: SMAX, dropout rate: 0.00
+      Approx layer RAM/VRAM requirement: 0 MB
+
+Iter:     1 [##############################]  128 /  128 | B.Loss: 6.79888e-01 | B.perf.: 381.96 it/s [?25h[?25l.68 it/s [?25h[?25l.95 it/s [?25h[?25l.64 it/s [?25h[?25l.81 it/s [?25h[?25l.89 it/s [?25h[?25l.85 it/s [?25h[?25l.40 it/s [?25h[?25l.66 it/s [?25h[?25l.77 it/s [?25h[?25l.69 it/s [?25h[?25l.74 it/s [?25h[?25l.17 it/s [?25h[?25l.22 it/s [?25h[?25l.75 it/s [?25h[?25l.11 it/s [?25h[?25l.12 it/s [?25h[?25l.88 it/s [?25h[?25l.80 it/s [?25h[?25l.93 it/s [?25h[?25l.62 it/s [?25h[?25l.79 it/s [?25h[?25l.72 it/s [?25h[?25l.07 it/s [?25h[?25l.15 it/s [?25h[?25l.27 it/s [?25h[?25l.09 it/s [?25h[?25l.43 it/s [?25h[?25l.77 it/s [?25h
+Total Net. nb weights: 165138 
+Total Network RAM/VRAM usage : 320 MB
+(without datasets, and prop. to batch_size)
+
+     Layer  Type       Forward             Backprop             Cumulated
+       N     T      [µs]  /  [%]         [µs]  /  [%]         [µs]  /  [%]
+  -------------------------------------------------------------------
+       1     I        0.0 /  0.0           0.0 /  0.0           0.0 /  0.0
+       2     C      200.9 / 16.1         178.8 / 11.5         379.6 / 13.5
+       3     P       73.0 /  5.8         148.4 /  9.5         221.4 /  7.9
+       4     C      200.8 / 16.1         275.3 / 17.7         476.1 / 17.0
+       5     C      292.0 / 23.4         300.6 / 19.3         592.6 / 21.1
+       6     P       28.6 /  2.3          56.5 /  3.6          85.1 /  3.0
+       7     C       87.4 /  7.0         139.3 /  8.9         226.6 /  8.1
+       8     C      162.1 / 13.0         172.6 / 11.1         334.8 / 11.9
+       9     P       14.0 /  1.1          28.9 /  1.9          42.9 /  1.5
+      10     C       59.9 /  4.8          94.9 /  6.1         154.7 /  5.5
+      11     C      109.7 /  8.8         155.5 / 10.0         265.2 /  9.4
+      12     C       19.9 /  1.6           7.9 /  0.5          27.8 /  1.0
+      13     P        0.4 /  0.0           0.4 /  0.0           0.8 /  0.0
+  -------------------------------------------------------------------
+   Total           1248.7 µs            1559.1 µs            2807.8 µs       
+
+
+Iter:     2 [##############################]  128 /  128 | B.Loss: 6.34193e-01 | B.perf.: 319.59 it/s [?25h[?25l.29 it/s [?25h[?25l.30 it/s [?25h[?25l.12 it/s [?25h[?25l.64 it/s [?25h[?25l.52 it/s [?25h[?25l.15 it/s [?25h[?25l.56 it/s [?25h[?25l.25 it/s [?25h[?25l.84 it/s [?25h[?25l.60 it/s [?25h[?25l.34 it/s [?25h[?25l.24 it/s [?25h[?25l.90 it/s [?25h[?25l.87 it/s [?25h[?25l.91 it/s [?25h[?25l.76 it/s [?25h[?25l.49 it/s [?25h[?25l.72 it/s [?25h[?25l.38 it/s [?25h[?25l.37 it/s [?25h[?25l.57 it/s [?25h[?25l.78 it/s [?25h[?25l.78 it/s [?25h[?25l.77 it/s [?25h[?25l.07 it/s [?25h[?25l.84 it/s [?25h[?25l.88 it/s [?25h[?25l.85 it/s [?25h
+Iter:     3 [##############################]  128 /  128 | B.Loss: 6.78723e-01 | B.perf.: 296.29 it/s [?25h[?25l.04 it/s [?25h[?25l.81 it/s [?25h[?25l.48 it/s [?25h[?25l.46 it/s [?25h[?25l.52 it/s [?25h[?25l.96 it/s [?25h[?25l.65 it/s [?25h[?25l.55 it/s [?25h[?25l.81 it/s [?25h[?25l.92 it/s [?25h[?25l.67 it/s [?25h[?25l.42 it/s [?25h[?25l.67 it/s [?25h[?25l.48 it/s [?25h[?25l.73 it/s [?25h[?25l.82 it/s [?25h[?25l.78 it/s [?25h[?25l.40 it/s [?25h[?25l.69 it/s [?25h[?25l.22 it/s [?25h[?25l.53 it/s [?25h[?25l.39 it/s [?25h[?25l.50 it/s [?25h[?25l.77 it/s [?25h[?25l/s [?25h[?25l.87 it/s [?25h[?25l.83 it/s [?25h[?25l.01 it/s [?25h
+Iter:     4 [##############################]  128 /  128 | B.Loss: 6.53363e-01 | B.perf.: 333.39 it/s [?25h[?25l.90 it/s [?25h[?25l.36 it/s [?25h[?25l.65 it/s [?25h[?25l.72 it/s [?25h[?25l.93 it/s [?25h[?25l.47 it/s [?25h[?25l.78 it/s [?25h[?25l.74 it/s [?25h[?25l.86 it/s [?25h[?25l.03 it/s [?25h[?25l.90 it/s [?25h[?25l.23 it/s [?25h[?25l.43 it/s [?25h[?25l.84 it/s [?25h[?25l.73 it/s [?25h[?25l.47 it/s [?25h[?25l.21 it/s [?25h[?25l.05 it/s [?25h[?25l.09 it/s [?25h[?25l.19 it/s [?25h[?25l.14 it/s [?25h[?25l.13 it/s [?25h[?25l.44 it/s [?25h[?25l.57 it/s [?25h[?25l.86 it/s [?25h[?25l.92 it/s [?25h[?25l.03 it/s [?25h[?25l.33 it/s [?25h
+Iter:     5 [##############################]  128 /  128 | B.Loss: 6.83768e-01 | B.perf.: 318.00 it/s [?25h[?25l.44 it/s [?25h[?25l.88 it/s [?25h[?25l.56 it/s [?25h[?25l.07 it/s [?25h[?25l.30 it/s [?25h[?25l.94 it/s [?25h[?25l.35 it/s [?25h[?25l.52 it/s [?25h[?25l.58 it/s [?25h[?25l.80 it/s [?25h[?25l.16 it/s [?25h[?25l.83 it/s [?25h[?25l.64 it/s [?25h[?25l.69 it/s [?25h[?25l.53 it/s [?25h[?25l.30 it/s [?25h[?25l.11 it/s [?25h[?25l.70 it/s [?25h[?25l.46 it/s [?25h[?25l.68 it/s [?25h[?25l.04 it/s [?25h[?25l.63 it/s [?25h[?25l.13 it/s [?25h[?25l.51 it/s [?25h[?25l.83 it/s [?25h[?25l.58 it/s [?25h[?25l.35 it/s [?25h[?25l.81 it/s [?25h
+Iter:     6 [##############################]  128 /  128 | B.Loss: 6.39452e-01 | B.perf.: 321.66 it/s [?25h[?25l.32 it/s [?25h[?25l.05 it/s [?25h[?25l.01 it/s [?25h[?25l.63 it/s [?25h[?25l.40 it/s [?25h[?25l.28 it/s [?25h[?25l.87 it/s [?25h[?25l.32 it/s [?25h[?25l.93 it/s [?25h[?25l.05 it/s [?25h[?25l.28 it/s [?25h[?25l.60 it/s [?25h[?25l.78 it/s [?25h[?25l.98 it/s [?25h[?25l.26 it/s [?25h[?25l.26 it/s [?25h[?25l.19 it/s [?25h[?25l.56 it/s [?25h[?25l.17 it/s [?25h[?25l.78 it/s [?25h[?25l.66 it/s [?25h[?25l.45 it/s [?25h[?25l.52 it/s [?25h[?25l.54 it/s [?25h[?25l.53 it/s [?25h[?25l.93 it/s [?25h[?25l.45 it/s [?25h[?25l.80 it/s [?25h
+Iter:     7 [##############################]  128 /  128 | B.Loss: 7.29401e-01 | B.perf.: 304.64 it/s [?25h[?25l.11 it/s [?25h[?25l.34 it/s [?25h[?25l.15 it/s [?25h[?25l.88 it/s [?25h[?25l.86 it/s [?25h[?25l.85 it/s [?25h[?25l.69 it/s [?25h[?25l.99 it/s [?25h[?25l.31 it/s [?25h[?25l.48 it/s [?25h[?25l.55 it/s [?25h[?25l.25 it/s [?25h[?25l.26 it/s [?25h[?25l.81 it/s [?25h[?25l.13 it/s [?25h[?25l.69 it/s [?25h[?25l.40 it/s [?25h[?25l.80 it/s [?25h[?25l.27 it/s [?25h[?25l.23 it/s [?25h[?25l.88 it/s [?25h[?25l.76 it/s [?25h[?25l.59 it/s [?25h[?25l.94 it/s [?25h[?25l.49 it/s [?25h[?25l.13 it/s [?25h[?25l.81 it/s [?25h[?25l.12 it/s [?25h
+Iter:     8 [##############################]  128 /  128 | B.Loss: 6.03835e-01 | B.perf.: 291.23 it/s [?25h[?25l.15 it/s [?25h[?25l.62 it/s [?25h[?25l.97 it/s [?25h[?25l.10 it/s [?25h[?25l.08 it/s [?25h[?25l.49 it/s [?25h[?25l.60 it/s [?25h[?25l.70 it/s [?25h[?25l.07 it/s [?25h[?25l.63 it/s [?25h[?25l.00 it/s [?25h[?25l.39 it/s [?25h[?25l.77 it/s [?25h[?25l.31 it/s [?25h[?25l.86 it/s [?25h[?25l.54 it/s [?25h[?25l.90 it/s [?25h[?25l.41 it/s [?25h[?25l.14 it/s [?25h[?25l.67 it/s [?25h[?25l.91 it/s [?25h[?25l.65 it/s [?25h[?25l.42 it/s [?25h[?25l.42 it/s [?25h[?25l.24 it/s [?25h[?25l.37 it/s [?25h[?25l.18 it/s [?25h[?25l.87 it/s [?25h
+Iter:     9 [##############################]  128 /  128 | B.Loss: 6.17098e-01 | B.perf.: 312.88 it/s [?25h[?25l.68 it/s [?25h[?25l.03 it/s [?25h[?25l.73 it/s [?25h[?25l.37 it/s [?25h[?25l.47 it/s [?25h[?25l.53 it/s [?25h[?25l.73 it/s [?25h[?25l.25 it/s [?25h[?25l.90 it/s [?25h[?25l.38 it/s [?25h[?25l.37 it/s [?25h[?25l.63 it/s [?25h[?25l.60 it/s [?25h[?25l.24 it/s [?25h[?25l.98 it/s [?25h[?25l.13 it/s [?25h[?25l.74 it/s [?25h[?25l.94 it/s [?25h[?25l.25 it/s [?25h[?25l.66 it/s [?25h[?25l.35 it/s [?25h[?25l.43 it/s [?25h[?25l.34 it/s [?25h[?25l.63 it/s [?25h[?25l.20 it/s [?25h[?25l.50 it/s [?25h[?25l.18 it/s [?25h[?25l.97 it/s [?25h
+Iter:    10 [##############################]  128 /  128 | B.Loss: 6.04086e-01 | B.perf.: 326.08 it/s [?25h[?25l.46 it/s [?25h[?25l.33 it/s [?25h[?25l.66 it/s [?25h[?25l.48 it/s [?25h[?25l.27 it/s [?25h[?25l.59 it/s [?25h[?25l.17 it/s [?25h[?25l.54 it/s [?25h[?25l.49 it/s [?25h[?25l.59 it/s [?25h[?25l.03 it/s [?25h[?25l.85 it/s [?25h[?25l.96 it/s [?25h[?25l.03 it/s [?25h[?25l.02 it/s [?25h[?25l.84 it/s [?25h[?25l.75 it/s [?25h[?25l.04 it/s [?25h[?25l.39 it/s [?25h[?25l.10 it/s [?25h[?25l.50 it/s [?25h[?25l.31 it/s [?25h[?25l.05 it/s [?25h[?25l.88 it/s [?25h[?25l.97 it/s [?25h[?25l.64 it/s [?25h[?25l.99 it/s [?25h[?25l.21 it/s [?25h
+Iter:    11 [##############################]  128 /  128 | B.Loss: 5.69468e-01 | B.perf.: 327.38 it/s [?25h[?25l.29 it/s [?25h[?25l.76 it/s [?25h[?25l.02 it/s [?25h[?25l.01 it/s [?25h[?25l.32 it/s [?25h[?25l.88 it/s [?25h[?25l.52 it/s [?25h[?25l.71 it/s [?25h[?25l.30 it/s [?25h[?25l.64 it/s [?25h[?25l.53 it/s [?25h[?25l.31 it/s [?25h[?25l.16 it/s [?25h[?25l.50 it/s [?25h[?25l.00 it/s [?25h[?25l.28 it/s [?25h[?25l.17 it/s [?25h[?25l.68 it/s [?25h[?25l.36 it/s [?25h[?25l.14 it/s [?25h[?25l.99 it/s [?25h[?25l.08 it/s [?25h[?25l.03 it/s [?25h[?25l.00 it/s [?25h[?25l.09 it/s [?25h[?25l.29 it/s [?25h[?25l.14 it/s [?25h[?25l.88 it/s [?25h
+Iter:    12 [##############################]  128 /  128 | B.Loss: 5.61033e-01 | B.perf.: 316.56 it/s [?25h[?25l.05 it/s [?25h[?25l.04 it/s [?25h[?25l.32 it/s [?25h[?25l.16 it/s [?25h[?25l.65 it/s [?25h[?25l.91 it/s [?25h[?25l.92 it/s [?25h[?25l.56 it/s [?25h[?25l.31 it/s [?25h[?25l.92 it/s [?25h[?25l.18 it/s [?25h[?25l.06 it/s [?25h[?25l.82 it/s [?25h[?25l.51 it/s [?25h[?25l.81 it/s [?25h[?25l.78 it/s [?25h[?25l.69 it/s [?25h[?25l.48 it/s [?25h[?25l.67 it/s [?25h[?25l.34 it/s [?25h[?25l.24 it/s [?25h[?25l.34 it/s [?25h[?25l.87 it/s [?25h[?25l.11 it/s [?25h[?25l.04 it/s [?25h[?25l.13 it/s [?25h[?25l.71 it/s [?25h[?25l.39 it/s [?25h
+Iter:    13 [##############################]  128 /  128 | B.Loss: 5.67255e-01 | B.perf.: 325.13 it/s [?25h[?25l.11 it/s [?25h[?25l.61 it/s [?25h[?25l.51 it/s [?25h[?25l.31 it/s [?25h[?25l.15 it/s [?25h[?25l.04 it/s [?25h[?25l.71 it/s [?25h[?25l.57 it/s [?25h[?25l.79 it/s [?25h[?25l.72 it/s [?25h[?25l.22 it/s [?25h[?25l.76 it/s [?25h[?25l.50 it/s [?25h[?25l.70 it/s [?25h[?25l.09 it/s [?25h[?25l.56 it/s [?25h[?25l.75 it/s [?25h[?25l.15 it/s [?25h[?25l.23 it/s [?25h[?25l.67 it/s [?25h[?25l.80 it/s [?25h[?25l.84 it/s [?25h[?25l.12 it/s [?25h[?25l.51 it/s [?25h[?25l.12 it/s [?25h[?25l.96 it/s [?25h[?25l.00 it/s [?25h[?25l.04 it/s [?25h
+Iter:    14 [##############################]  128 /  128 | B.Loss: 6.18982e-01 | B.perf.: 317.02 it/s [?25h[?25l.99 it/s [?25h[?25l.42 it/s [?25h[?25l.12 it/s [?25h[?25l.79 it/s [?25h[?25l.15 it/s [?25h[?25l.00 it/s [?25h[?25l.17 it/s [?25h[?25l.01 it/s [?25h[?25l.51 it/s [?25h[?25l.34 it/s [?25h[?25l.68 it/s [?25h[?25l.32 it/s [?25h[?25l.26 it/s [?25h[?25l.97 it/s [?25h[?25l.00 it/s [?25h[?25l.55 it/s [?25h[?25l.91 it/s [?25h[?25l.03 it/s [?25h[?25l.05 it/s [?25h[?25l.32 it/s [?25h[?25l.15 it/s [?25h[?25l.86 it/s [?25h[?25l.36 it/s [?25h[?25l.72 it/s [?25h[?25l.71 it/s [?25h[?25l.98 it/s [?25h[?25l.51 it/s [?25h[?25l.83 it/s [?25h
+Iter:    15 [##############################]  128 /  128 | B.Loss: 6.98604e-01 | B.perf.: 334.68 it/s [?25h[?25l.98 it/s [?25h[?25l.66 it/s [?25h[?25l.04 it/s [?25h[?25l.68 it/s [?25h[?25l.50 it/s [?25h[?25l.01 it/s [?25h[?25l.99 it/s [?25h[?25l.22 it/s [?25h[?25l.50 it/s [?25h[?25l.03 it/s [?25h[?25l.24 it/s [?25h[?25l.49 it/s [?25h[?25l.21 it/s [?25h[?25l.35 it/s [?25h[?25l.85 it/s [?25h[?25l.84 it/s [?25h[?25l.58 it/s [?25h[?25l.64 it/s [?25h[?25l.89 it/s [?25h[?25l.48 it/s [?25h[?25l.62 it/s [?25h[?25l.67 it/s [?25h[?25l.37 it/s [?25h[?25l.40 it/s [?25h[?25l.23 it/s [?25h[?25l.47 it/s [?25h[?25l.48 it/s [?25h[?25l.32 it/s [?25h
+Iter:    16 [##############################]  128 /  128 | B.Loss: 5.27162e-01 | B.perf.: 314.01 it/s [?25h[?25l.00 it/s [?25h[?25l.34 it/s [?25h[?25l.40 it/s [?25h[?25l.29 it/s [?25h[?25l.42 it/s [?25h[?25l.04 it/s [?25h[?25l.49 it/s [?25h[?25l.57 it/s [?25h[?25l.71 it/s [?25h[?25l.09 it/s [?25h[?25l.13 it/s [?25h[?25l.39 it/s [?25h[?25l.88 it/s [?25h[?25l.51 it/s [?25h[?25l.93 it/s [?25h[?25l.89 it/s [?25h[?25l.21 it/s [?25h[?25l.81 it/s [?25h[?25l.79 it/s [?25h[?25l.21 it/s [?25h[?25l.19 it/s [?25h[?25l.88 it/s [?25h[?25l.22 it/s [?25h[?25l.78 it/s [?25h[?25l.94 it/s [?25h[?25l.93 it/s [?25h[?25l.27 it/s [?25h[?25l.96 it/s [?25h
+Iter:    17 [##############################]  128 /  128 | B.Loss: 5.32018e-01 | B.perf.: 316.93 it/s [?25h[?25l.17 it/s [?25h[?25l.41 it/s [?25h[?25l.02 it/s [?25h[?25l.07 it/s [?25h[?25l.58 it/s [?25h[?25l.04 it/s [?25h[?25l.93 it/s [?25h[?25l.50 it/s [?25h[?25l.85 it/s [?25h[?25l.56 it/s [?25h[?25l.45 it/s [?25h[?25l.93 it/s [?25h[?25l.43 it/s [?25h[?25l.39 it/s [?25h[?25l.61 it/s [?25h[?25l.85 it/s [?25h[?25l.24 it/s [?25h[?25l.64 it/s [?25h[?25l.38 it/s [?25h[?25l.04 it/s [?25h[?25l.08 it/s [?25h[?25l.53 it/s [?25h[?25l.02 it/s [?25h[?25l.47 it/s [?25h[?25l.65 it/s [?25h[?25l.13 it/s [?25h[?25l.90 it/s [?25h[?25l.65 it/s [?25h
+Iter:    18 [##############################]  128 /  128 | B.Loss: 5.58749e-01 | B.perf.: 321.17 it/s [?25h[?25l.87 it/s [?25h[?25l.57 it/s [?25h[?25l.13 it/s [?25h[?25l.21 it/s [?25h[?25l.24 it/s [?25h[?25l.61 it/s [?25h[?25l.17 it/s [?25h[?25l.60 it/s [?25h[?25l.04 it/s [?25h[?25l.71 it/s [?25h[?25l.23 it/s [?25h[?25l.96 it/s [?25h[?25l.08 it/s [?25h[?25l.10 it/s [?25h[?25l.55 it/s [?25h[?25l.35 it/s [?25h[?25l.65 it/s [?25h[?25l.90 it/s [?25h[?25l.73 it/s [?25h[?25l.58 it/s [?25h[?25l.36 it/s [?25h[?25l.51 it/s [?25h[?25l.50 it/s [?25h[?25l.70 it/s [?25h[?25l.37 it/s [?25h[?25l.71 it/s [?25h[?25l.09 it/s [?25h[?25l.14 it/s [?25h
+Iter:    19 [##############################]  128 /  128 | B.Loss: 4.42565e-01 | B.perf.: 329.36 it/s [?25h[?25l.68 it/s [?25h[?25l.62 it/s [?25h[?25l.08 it/s [?25h[?25l.95 it/s [?25h[?25l.04 it/s [?25h[?25l.92 it/s [?25h[?25l.44 it/s [?25h[?25l.65 it/s [?25h[?25l.26 it/s [?25h[?25l.61 it/s [?25h[?25l.82 it/s [?25h[?25l.99 it/s [?25h[?25l.87 it/s [?25h[?25l.11 it/s [?25h[?25l.29 it/s [?25h[?25l.79 it/s [?25h[?25l.99 it/s [?25h[?25l.93 it/s [?25h[?25l.65 it/s [?25h[?25l.66 it/s [?25h[?25l.16 it/s [?25h[?25l.50 it/s [?25h[?25l.48 it/s [?25h[?25l.30 it/s [?25h[?25l.32 it/s [?25h[?25l.84 it/s [?25h[?25l.14 it/s [?25h[?25l.39 it/s [?25h
+Iter:    20 [##############################]  128 /  128 | B.Loss: 4.20748e-01 | B.perf.: 320.94 it/s [?25h[?25l.64 it/s [?25h[?25l.03 it/s [?25h[?25l.35 it/s [?25h[?25l.79 it/s [?25h[?25l.76 it/s [?25h[?25l.17 it/s [?25h[?25l.02 it/s [?25h[?25l.88 it/s [?25h[?25l.17 it/s [?25h[?25l.75 it/s [?25h[?25l.48 it/s [?25h[?25l.42 it/s [?25h[?25l.61 it/s [?25h[?25l.95 it/s [?25h[?25l.46 it/s [?25h[?25l.41 it/s [?25h[?25l.24 it/s [?25h[?25l.23 it/s [?25h[?25l.99 it/s [?25h[?25l.77 it/s [?25h[?25l.46 it/s [?25h[?25l.60 it/s [?25h[?25l.21 it/s [?25h[?25l.08 it/s [?25h[?25l.62 it/s [?25h[?25l.91 it/s [?25h[?25l.61 it/s [?25h[?25l.66 it/s [?25h
+Iter:    21 [##############################]  128 /  128 | B.Loss: 4.85431e-01 | B.perf.: 327.73 it/s [?25h[?25l.51 it/s [?25h[?25l.20 it/s [?25h[?25l.47 it/s [?25h[?25l.02 it/s [?25h[?25l.25 it/s [?25h[?25l.93 it/s [?25h[?25l.96 it/s [?25h[?25l.26 it/s [?25h[?25l.82 it/s [?25h[?25l.18 it/s [?25h[?25l.74 it/s [?25h[?25l.43 it/s [?25h[?25l.23 it/s [?25h[?25l.81 it/s [?25h[?25l.82 it/s [?25h[?25l.79 it/s [?25h[?25l.37 it/s [?25h[?25l.73 it/s [?25h[?25l.66 it/s [?25h[?25l.77 it/s [?25h[?25l.37 it/s [?25h[?25l.09 it/s [?25h[?25l.84 it/s [?25h[?25l.81 it/s [?25h[?25l.69 it/s [?25h[?25l.70 it/s [?25h[?25l.45 it/s [?25h[?25l.75 it/s [?25h
+Iter:    22 [##############################]  128 /  128 | B.Loss: 3.48022e-01 | B.perf.: 290.73 it/s [?25h[?25l.21 it/s [?25h[?25l.56 it/s [?25h[?25l.38 it/s [?25h[?25l.00 it/s [?25h[?25l.20 it/s [?25h[?25l.43 it/s [?25h[?25l.87 it/s [?25h[?25l.52 it/s [?25h[?25l.21 it/s [?25h[?25l.78 it/s [?25h[?25l.60 it/s [?25h[?25l.02 it/s [?25h[?25l.61 it/s [?25h[?25l.49 it/s [?25h[?25l.73 it/s [?25h[?25l.34 it/s [?25h[?25l.84 it/s [?25h[?25l.12 it/s [?25h[?25l.52 it/s [?25h[?25l.50 it/s [?25h[?25l.56 it/s [?25h[?25l.28 it/s [?25h[?25l.98 it/s [?25h[?25l.64 it/s [?25h[?25l.71 it/s [?25h[?25l.49 it/s [?25h[?25l.64 it/s [?25h[?25l.64 it/s [?25h
+Iter:    23 [##############################]  128 /  128 | B.Loss: 3.87438e-01 | B.perf.: 330.02 it/s [?25h[?25l.75 it/s [?25h[?25l.83 it/s [?25h[?25l.88 it/s [?25h[?25l.09 it/s [?25h[?25l.25 it/s [?25h[?25l.34 it/s [?25h[?25l.72 it/s [?25h[?25l.82 it/s [?25h[?25l.76 it/s [?25h[?25l.48 it/s [?25h[?25l.03 it/s [?25h[?25l.70 it/s [?25h[?25l.58 it/s [?25h[?25l.97 it/s [?25h[?25l.75 it/s [?25h[?25l.98 it/s [?25h[?25l.05 it/s [?25h[?25l.72 it/s [?25h[?25l.05 it/s [?25h[?25l.09 it/s [?25h[?25l.82 it/s [?25h[?25l.44 it/s [?25h[?25l.28 it/s [?25h[?25l.97 it/s [?25h[?25l.28 it/s [?25h[?25l.80 it/s [?25h[?25l.35 it/s [?25h[?25l.91 it/s [?25h
+Iter:    24 [##############################]  128 /  128 | B.Loss: 5.49705e-01 | B.perf.: 323.82 it/s [?25h[?25l.13 it/s [?25h[?25l.04 it/s [?25h[?25l.84 it/s [?25h[?25l.73 it/s [?25h[?25l.56 it/s [?25h[?25l.48 it/s [?25h[?25l.17 it/s [?25h[?25l.14 it/s [?25h[?25l.69 it/s [?25h[?25l.15 it/s [?25h[?25l.80 it/s [?25h[?25l.52 it/s [?25h[?25l.74 it/s [?25h[?25l.58 it/s [?25h[?25l.59 it/s [?25h[?25l.21 it/s [?25h[?25l.42 it/s [?25h[?25l.43 it/s [?25h[?25l.41 it/s [?25h[?25l.15 it/s [?25h[?25l.40 it/s [?25h[?25l.76 it/s [?25h[?25l.58 it/s [?25h[?25l.46 it/s [?25h[?25l.92 it/s [?25h[?25l.39 it/s [?25h[?25l.38 it/s [?25h[?25l.07 it/s [?25h
+Iter:    25 [##############################]  128 /  128 | B.Loss: 4.11964e-01 | B.perf.: 317.42 it/s [?25h[?25l.22 it/s [?25h[?25l.07 it/s [?25h[?25l.03 it/s [?25h[?25l.65 it/s [?25h[?25l.22 it/s [?25h[?25l.37 it/s [?25h[?25l.48 it/s [?25h[?25l.41 it/s [?25h[?25l.82 it/s [?25h[?25l.21 it/s [?25h[?25l.94 it/s [?25h[?25l.30 it/s [?25h[?25l.23 it/s [?25h[?25l.93 it/s [?25h[?25l.98 it/s [?25h[?25l.41 it/s [?25h[?25l.52 it/s [?25h[?25l.28 it/s [?25h[?25l.95 it/s [?25h[?25l.36 it/s [?25h[?25l.95 it/s [?25h[?25l.27 it/s [?25h[?25l.53 it/s [?25h[?25l.55 it/s [?25h[?25l.54 it/s [?25h[?25l.62 it/s [?25h[?25l.41 it/s [?25h[?25l.81 it/s [?25h
+Iter:    26 [##############################]  128 /  128 | B.Loss: 4.75328e-01 | B.perf.: 320.51 it/s [?25h[?25l.94 it/s [?25h[?25l.11 it/s [?25h[?25l.27 it/s [?25h[?25l.92 it/s [?25h[?25l.06 it/s [?25h[?25l.38 it/s [?25h[?25l.15 it/s [?25h[?25l.12 it/s [?25h[?25l.70 it/s [?25h[?25l.14 it/s [?25h[?25l.30 it/s [?25h[?25l.10 it/s [?25h[?25l.21 it/s [?25h[?25l.18 it/s [?25h[?25l.57 it/s [?25h[?25l.75 it/s [?25h[?25l.96 it/s [?25h[?25l.54 it/s [?25h[?25l.06 it/s [?25h[?25l.84 it/s [?25h[?25l.92 it/s [?25h[?25l.94 it/s [?25h[?25l.41 it/s [?25h[?25l.68 it/s [?25h[?25l.94 it/s [?25h[?25l.97 it/s [?25h[?25l.13 it/s [?25h[?25l.22 it/s [?25h
+Iter:    27 [##############################]  128 /  128 | B.Loss: 4.31918e-01 | B.perf.: 334.92 it/s [?25h[?25l.29 it/s [?25h[?25l.66 it/s [?25h[?25l.64 it/s [?25h[?25l.78 it/s [?25h[?25l.23 it/s [?25h[?25l.00 it/s [?25h[?25l.32 it/s [?25h[?25l.15 it/s [?25h[?25l.13 it/s [?25h[?25l.39 it/s [?25h[?25l.93 it/s [?25h[?25l.19 it/s [?25h[?25l.80 it/s [?25h[?25l.71 it/s [?25h[?25l.74 it/s [?25h[?25l.94 it/s [?25h[?25l.86 it/s [?25h[?25l.56 it/s [?25h[?25l.13 it/s [?25h[?25l.06 it/s [?25h[?25l.69 it/s [?25h[?25l.56 it/s [?25h[?25l.63 it/s [?25h[?25l.82 it/s [?25h[?25l.28 it/s [?25h[?25l.89 it/s [?25h[?25l.72 it/s [?25h[?25l.47 it/s [?25h
+Iter:    28 [##############################]  128 /  128 | B.Loss: 4.59957e-01 | B.perf.: 334.59 it/s [?25h[?25l.85 it/s [?25h[?25l.49 it/s [?25h[?25l.75 it/s [?25h[?25l.40 it/s [?25h[?25l.66 it/s [?25h[?25l.44 it/s [?25h[?25l.24 it/s [?25h[?25l.37 it/s [?25h[?25l.48 it/s [?25h[?25l.59 it/s [?25h[?25l.99 it/s [?25h[?25l.28 it/s [?25h[?25l.87 it/s [?25h[?25l.93 it/s [?25h[?25l.47 it/s [?25h[?25l.41 it/s [?25h[?25l.18 it/s [?25h[?25l.25 it/s [?25h[?25l.55 it/s [?25h[?25l.11 it/s [?25h[?25l.70 it/s [?25h[?25l.03 it/s [?25h[?25l.33 it/s [?25h[?25l.35 it/s [?25h[?25l.32 it/s [?25h[?25l.49 it/s [?25h[?25l.08 it/s [?25h[?25l.55 it/s [?25h
+Iter:    29 [##############################]  128 /  128 | B.Loss: 3.46713e-01 | B.perf.: 333.57 it/s [?25h[?25l.83 it/s [?25h[?25l.35 it/s [?25h[?25l.74 it/s [?25h[?25l.67 it/s [?25h[?25l.29 it/s [?25h[?25l.85 it/s [?25h[?25l.92 it/s [?25h[?25l.65 it/s [?25h[?25l.79 it/s [?25h[?25l.09 it/s [?25h[?25l.37 it/s [?25h[?25l.85 it/s [?25h[?25l.33 it/s [?25h[?25l.20 it/s [?25h[?25l.95 it/s [?25h[?25l.85 it/s [?25h[?25l.45 it/s [?25h[?25l.02 it/s [?25h[?25l.72 it/s [?25h[?25l.88 it/s [?25h[?25l.11 it/s [?25h[?25l.31 it/s [?25h[?25l.88 it/s [?25h[?25l.97 it/s [?25h[?25l.81 it/s [?25h[?25l.76 it/s [?25h[?25l.50 it/s [?25h[?25l.03 it/s [?25h
+Iter:    30 [##############################]  128 /  128 | B.Loss: 5.06946e-01 | B.perf.: 334.09 it/s [?25h[?25l.90 it/s [?25h[?25l.53 it/s [?25h[?25l.87 it/s [?25h[?25l.37 it/s [?25h[?25l.45 it/s [?25h[?25l.42 it/s [?25h[?25l.89 it/s [?25h[?25l.20 it/s [?25h[?25l.18 it/s [?25h[?25l.32 it/s [?25h[?25l.57 it/s [?25h[?25l.58 it/s [?25h[?25l.95 it/s [?25h[?25l.13 it/s [?25h[?25l.19 it/s [?25h[?25l.13 it/s [?25h[?25l.60 it/s [?25h[?25l.62 it/s [?25h[?25l.74 it/s [?25h[?25l.20 it/s [?25h[?25l.89 it/s [?25h[?25l.96 it/s [?25h[?25l.19 it/s [?25h[?25l.67 it/s [?25h[?25l.92 it/s [?25h[?25l.78 it/s [?25h[?25l.66 it/s [?25h[?25l.46 it/s [?25h
+Iter:    31 [##############################]  128 /  128 | B.Loss: 3.20689e-01 | B.perf.: 331.99 it/s [?25h[?25l.04 it/s [?25h[?25l.49 it/s [?25h[?25l.18 it/s [?25h[?25l.03 it/s [?25h[?25l.20 it/s [?25h[?25l.71 it/s [?25h[?25l.97 it/s [?25h[?25l.47 it/s [?25h[?25l.88 it/s [?25h[?25l.20 it/s [?25h[?25l.93 it/s [?25h[?25l.87 it/s [?25h[?25l.45 it/s [?25h[?25l.82 it/s [?25h[?25l.00 it/s [?25h[?25l.81 it/s [?25h[?25l.44 it/s [?25h[?25l.13 it/s [?25h[?25l.61 it/s [?25h[?25l.18 it/s [?25h[?25l.80 it/s [?25h[?25l.20 it/s [?25h[?25l.66 it/s [?25h[?25l.31 it/s [?25h[?25l.04 it/s [?25h[?25l.33 it/s [?25h[?25l.29 it/s [?25h[?25l.46 it/s [?25h
+Iter:    32 [##############################]  128 /  128 | B.Loss: 4.68242e-01 | B.perf.: 339.21 it/s [?25h[?25l.72 it/s [?25h[?25l.04 it/s [?25h[?25l.20 it/s [?25h[?25l.00 it/s [?25h[?25l/s [?25h[?25l.71 it/s [?25h[?25l.99 it/s [?25h[?25l.79 it/s [?25h[?25l.29 it/s [?25h[?25l.96 it/s [?25h[?25l.87 it/s [?25h[?25l.86 it/s [?25h[?25l.80 it/s [?25h[?25l.19 it/s [?25h[?25l.99 it/s [?25h[?25l.55 it/s [?25h[?25l.64 it/s [?25h[?25l.20 it/s [?25h[?25l.67 it/s [?25h[?25l.39 it/s [?25h[?25l.27 it/s [?25h[?25l.01 it/s [?25h[?25l.97 it/s [?25h[?25l.75 it/s [?25h[?25l.80 it/s [?25h[?25l.67 it/s [?25h[?25l.66 it/s [?25h[?25l.59 it/s [?25h
+Iter:    33 [##############################]  128 /  128 | B.Loss: 5.23291e-01 | B.perf.: 332.58 it/s [?25h[?25l.19 it/s [?25h[?25l.41 it/s [?25h[?25l.75 it/s [?25h[?25l.04 it/s [?25h[?25l.64 it/s [?25h[?25l.68 it/s [?25h[?25l.52 it/s [?25h[?25l.40 it/s [?25h[?25l.25 it/s [?25h[?25l.20 it/s [?25h[?25l.20 it/s [?25h[?25l.46 it/s [?25h[?25l.21 it/s [?25h[?25l.94 it/s [?25h[?25l.46 it/s [?25h[?25l.55 it/s [?25h[?25l.37 it/s [?25h[?25l.76 it/s [?25h[?25l.36 it/s [?25h[?25l.52 it/s [?25h[?25l.12 it/s [?25h[?25l.65 it/s [?25h[?25l.69 it/s [?25h[?25l.93 it/s [?25h[?25l.88 it/s [?25h[?25l.47 it/s [?25h[?25l.39 it/s [?25h[?25l.65 it/s [?25h
+Iter:    34 [##############################]  128 /  128 | B.Loss: 3.20096e-01 | B.perf.: 303.06 it/s [?25h[?25l.26 it/s [?25h[?25l.35 it/s [?25h[?25l.15 it/s [?25h[?25l.43 it/s [?25h[?25l.73 it/s [?25h[?25l.10 it/s [?25h[?25l.97 it/s [?25h[?25l.76 it/s [?25h[?25l.59 it/s [?25h[?25l.88 it/s [?25h[?25l.04 it/s [?25h[?25l.84 it/s [?25h[?25l.04 it/s [?25h[?25l.03 it/s [?25h[?25l.70 it/s [?25h[?25l.90 it/s [?25h[?25l.04 it/s [?25h[?25l.35 it/s [?25h[?25l.47 it/s [?25h[?25l.25 it/s [?25h[?25l.49 it/s [?25h[?25l.12 it/s [?25h[?25l.11 it/s [?25h[?25l.90 it/s [?25h[?25l.80 it/s [?25h[?25l.38 it/s [?25h[?25l.65 it/s [?25h[?25l.25 it/s [?25h
+Iter:    35 [##############################]  128 /  128 | B.Loss: 4.09480e-01 | B.perf.: 303.24 it/s [?25h[?25l.72 it/s [?25h[?25l.52 it/s [?25h[?25l.95 it/s [?25h[?25l.08 it/s [?25h[?25l.59 it/s [?25h[?25l.73 it/s [?25h[?25l.73 it/s [?25h[?25l.40 it/s [?25h[?25l.81 it/s [?25h[?25l.27 it/s [?25h[?25l.52 it/s [?25h[?25l.89 it/s [?25h[?25l.40 it/s [?25h[?25l.34 it/s [?25h[?25l.74 it/s [?25h[?25l.63 it/s [?25h[?25l.69 it/s [?25h[?25l.37 it/s [?25h[?25l.03 it/s [?25h[?25l.26 it/s [?25h[?25l.58 it/s [?25h[?25l.49 it/s [?25h[?25l.46 it/s [?25h[?25l.36 it/s [?25h[?25l.25 it/s [?25h[?25l.05 it/s [?25h[?25l.37 it/s [?25h[?25l.48 it/s [?25h
+Iter:    36 [##############################]  128 /  128 | B.Loss: 2.94228e-01 | B.perf.: 294.80 it/s [?25h[?25l.37 it/s [?25h[?25l.55 it/s [?25h[?25l.04 it/s [?25h[?25l.22 it/s [?25h[?25l.91 it/s [?25h[?25l.98 it/s [?25h[?25l.60 it/s [?25h[?25l.81 it/s [?25h[?25l.18 it/s [?25h[?25l.55 it/s [?25h[?25l.50 it/s [?25h[?25l.18 it/s [?25h[?25l.90 it/s [?25h[?25l.00 it/s [?25h[?25l.48 it/s [?25h[?25l.15 it/s [?25h[?25l.26 it/s [?25h[?25l.01 it/s [?25h[?25l.84 it/s [?25h[?25l.65 it/s [?25h[?25l.05 it/s [?25h[?25l.88 it/s [?25h[?25l.47 it/s [?25h[?25l.39 it/s [?25h[?25l.27 it/s [?25h[?25l.77 it/s [?25h[?25l.83 it/s [?25h[?25l.11 it/s [?25h
+Iter:    37 [##############################]  128 /  128 | B.Loss: 3.24230e-01 | B.perf.: 320.26 it/s [?25h[?25l.25 it/s [?25h[?25l.78 it/s [?25h[?25l.93 it/s [?25h[?25l.30 it/s [?25h[?25l.10 it/s [?25h[?25l.11 it/s [?25h[?25l.14 it/s [?25h[?25l.67 it/s [?25h[?25l.72 it/s [?25h[?25l.42 it/s [?25h[?25l.40 it/s [?25h[?25l.24 it/s [?25h[?25l.40 it/s [?25h[?25l.78 it/s [?25h[?25l.64 it/s [?25h[?25l.78 it/s [?25h[?25l.84 it/s [?25h[?25l.04 it/s [?25h[?25l.83 it/s [?25h[?25l.61 it/s [?25h[?25l.00 it/s [?25h[?25l.52 it/s [?25h[?25l.88 it/s [?25h[?25l.60 it/s [?25h[?25l.62 it/s [?25h[?25l.68 it/s [?25h[?25l.11 it/s [?25h[?25l.05 it/s [?25h
+Iter:    38 [##############################]  128 /  128 | B.Loss: 4.17491e-01 | B.perf.: 333.64 it/s [?25h[?25l.72 it/s [?25h[?25l.88 it/s [?25h[?25l.67 it/s [?25h[?25l.72 it/s [?25h[?25l.76 it/s [?25h[?25l.31 it/s [?25h[?25l.25 it/s [?25h[?25l.38 it/s [?25h[?25l.40 it/s [?25h[?25l.19 it/s [?25h[?25l.05 it/s [?25h[?25l.11 it/s [?25h[?25l.53 it/s [?25h[?25l.46 it/s [?25h[?25l.52 it/s [?25h[?25l.86 it/s [?25h[?25l.74 it/s [?25h[?25l.49 it/s [?25h[?25l.67 it/s [?25h[?25l.16 it/s [?25h[?25l.55 it/s [?25h[?25l.32 it/s [?25h[?25l.57 it/s [?25h[?25l.28 it/s [?25h[?25l.64 it/s [?25h[?25l.72 it/s [?25h[?25l.76 it/s [?25h[?25l.36 it/s [?25h
+Iter:    39 [##############################]  128 /  128 | B.Loss: 4.14850e-01 | B.perf.: 299.52 it/s [?25h[?25l.59 it/s [?25h[?25l.08 it/s [?25h[?25l.03 it/s [?25h[?25l.57 it/s [?25h[?25l.29 it/s [?25h[?25l.25 it/s [?25h[?25l.50 it/s [?25h[?25l.15 it/s [?25h[?25l.76 it/s [?25h[?25l.51 it/s [?25h[?25l.92 it/s [?25h[?25l.75 it/s [?25h[?25l.14 it/s [?25h[?25l.98 it/s [?25h[?25l.59 it/s [?25h[?25l.72 it/s [?25h[?25l.28 it/s [?25h[?25l.02 it/s [?25h[?25l.50 it/s [?25h[?25l.02 it/s [?25h[?25l.47 it/s [?25h[?25l.41 it/s [?25h[?25l.01 it/s [?25h[?25l.01 it/s [?25h[?25l.47 it/s [?25h[?25l.52 it/s [?25h[?25l.41 it/s [?25h[?25l.74 it/s [?25h
+Iter:    40 [##############################]  128 /  128 | B.Loss: 5.46619e-01 | B.perf.: 291.83 it/s [?25h[?25l.77 it/s [?25h[?25l.53 it/s [?25h[?25l.22 it/s [?25h[?25l.12 it/s [?25h[?25l.37 it/s [?25h[?25l.36 it/s [?25h[?25l.73 it/s [?25h[?25l.64 it/s [?25h[?25l.49 it/s [?25h[?25l.30 it/s [?25h[?25l.45 it/s [?25h[?25l.08 it/s [?25h[?25l.69 it/s [?25h[?25l.41 it/s [?25h[?25l.22 it/s [?25h[?25l.25 it/s [?25h[?25l.16 it/s [?25h[?25l.09 it/s [?25h[?25l.35 it/s [?25h[?25l.08 it/s [?25h[?25l.98 it/s [?25h[?25l.56 it/s [?25h[?25l.16 it/s [?25h[?25l.46 it/s [?25h[?25l.29 it/s [?25h[?25l.26 it/s [?25h[?25l.47 it/s [?25h[?25l.33 it/s [?25h
+Iter:    41 [##############################]  128 /  128 | B.Loss: 3.48544e-01 | B.perf.: 334.79 it/s [?25h[?25l.62 it/s [?25h[?25l.38 it/s [?25h[?25l.66 it/s [?25h[?25l.54 it/s [?25h[?25l.61 it/s [?25h[?25l.61 it/s [?25h[?25l.20 it/s [?25h[?25l.87 it/s [?25h[?25l.71 it/s [?25h[?25l.41 it/s [?25h[?25l.52 it/s [?25h[?25l.30 it/s [?25h[?25l.54 it/s [?25h[?25l.06 it/s [?25h[?25l.27 it/s [?25h[?25l.75 it/s [?25h[?25l.07 it/s [?25h[?25l.26 it/s [?25h[?25l.08 it/s [?25h[?25l.70 it/s [?25h[?25l.41 it/s [?25h[?25l.36 it/s [?25h[?25l.86 it/s [?25h[?25l.50 it/s [?25h[?25l.96 it/s [?25h[?25l.13 it/s [?25h[?25l.56 it/s [?25h[?25l.18 it/s [?25h
+Iter:    42 [##############################]  128 /  128 | B.Loss: 4.46282e-01 | B.perf.: 327.20 it/s [?25h[?25l.68 it/s [?25h[?25l.99 it/s [?25h[?25l.84 it/s [?25h[?25l.50 it/s [?25h[?25l.90 it/s [?25h[?25l.62 it/s [?25h[?25l.95 it/s [?25h[?25l.03 it/s [?25h[?25l.12 it/s [?25h[?25l.26 it/s [?25h[?25l.38 it/s [?25h[?25l.72 it/s [?25h[?25l.95 it/s [?25h[?25l.60 it/s [?25h[?25l.10 it/s [?25h[?25l.26 it/s [?25h[?25l.18 it/s [?25h[?25l.07 it/s [?25h[?25l.39 it/s [?25h[?25l.89 it/s [?25h[?25l.21 it/s [?25h[?25l.57 it/s [?25h[?25l.64 it/s [?25h[?25l.67 it/s [?25h[?25l.53 it/s [?25h[?25l.18 it/s [?25h[?25l.52 it/s [?25h[?25l.21 it/s [?25h
+Iter:    43 [##############################]  128 /  128 | B.Loss: 3.87621e-01 | B.perf.: 330.57 it/s [?25h[?25l.08 it/s [?25h[?25l.56 it/s [?25h[?25l.00 it/s [?25h[?25l.91 it/s [?25h[?25l.15 it/s [?25h[?25l.78 it/s [?25h[?25l.90 it/s [?25h[?25l.60 it/s [?25h[?25l.58 it/s [?25h[?25l.14 it/s [?25h[?25l.72 it/s [?25h[?25l.24 it/s [?25h[?25l.26 it/s [?25h[?25l.23 it/s [?25h[?25l.17 it/s [?25h[?25l.12 it/s [?25h[?25l.18 it/s [?25h[?25l.80 it/s [?25h[?25l.33 it/s [?25h[?25l.96 it/s [?25h[?25l.57 it/s [?25h[?25l.39 it/s [?25h[?25l.09 it/s [?25h[?25l.07 it/s [?25h[?25l.71 it/s [?25h[?25l.00 it/s [?25h[?25l.64 it/s [?25h[?25l.87 it/s [?25h
+Iter:    44 [##############################]  128 /  128 | B.Loss: 3.75788e-01 | B.perf.: 288.78 it/s [?25h[?25l.69 it/s [?25h[?25l.50 it/s [?25h[?25l.64 it/s [?25h[?25l.51 it/s [?25h[?25l.30 it/s [?25h[?25l.64 it/s [?25h[?25l.73 it/s [?25h[?25l.48 it/s [?25h[?25l.93 it/s [?25h[?25l.46 it/s [?25h[?25l.41 it/s [?25h[?25l.44 it/s [?25h[?25l.29 it/s [?25h[?25l.86 it/s [?25h[?25l.35 it/s [?25h[?25l.90 it/s [?25h[?25l.37 it/s [?25h[?25l.38 it/s [?25h[?25l.67 it/s [?25h[?25l.07 it/s [?25h[?25l.07 it/s [?25h[?25l.96 it/s [?25h[?25l.42 it/s [?25h[?25l.59 it/s [?25h[?25l.25 it/s [?25h[?25l.47 it/s [?25h[?25l.04 it/s [?25h[?25l.09 it/s [?25h
+Iter:    45 [##############################]  128 /  128 | B.Loss: 3.24009e-01 | B.perf.: 324.94 it/s [?25h[?25l.89 it/s [?25h[?25l.11 it/s [?25h[?25l.95 it/s [?25h[?25l.72 it/s [?25h[?25l.83 it/s [?25h[?25l.86 it/s [?25h[?25l.00 it/s [?25h[?25l.65 it/s [?25h[?25l.82 it/s [?25h[?25l.15 it/s [?25h[?25l.49 it/s [?25h[?25l.62 it/s [?25h[?25l.66 it/s [?25h[?25l.69 it/s [?25h[?25l.63 it/s [?25h[?25l.12 it/s [?25h[?25l.08 it/s [?25h[?25l.24 it/s [?25h[?25l.62 it/s [?25h[?25l.24 it/s [?25h[?25l.16 it/s [?25h[?25l.58 it/s [?25h[?25l.84 it/s [?25h[?25l.46 it/s [?25h[?25l.14 it/s [?25h[?25l.42 it/s [?25h[?25l.10 it/s [?25h[?25l.71 it/s [?25h
+Iter:    46 [##############################]  128 /  128 | B.Loss: 4.17169e-01 | B.perf.: 330.13 it/s [?25h[?25l.53 it/s [?25h[?25l.66 it/s [?25h[?25l.19 it/s [?25h[?25l.84 it/s [?25h[?25l.84 it/s [?25h[?25l.31 it/s [?25h[?25l.99 it/s [?25h[?25l.24 it/s [?25h[?25l.15 it/s [?25h[?25l.13 it/s [?25h[?25l.24 it/s [?25h[?25l.85 it/s [?25h[?25l.76 it/s [?25h[?25l.42 it/s [?25h[?25l.81 it/s [?25h[?25l.88 it/s [?25h[?25l.85 it/s [?25h[?25l.53 it/s [?25h[?25l.97 it/s [?25h[?25l.17 it/s [?25h[?25l.76 it/s [?25h[?25l.85 it/s [?25h[?25l.63 it/s [?25h[?25l.45 it/s [?25h[?25l.28 it/s [?25h[?25l.34 it/s [?25h[?25l.13 it/s [?25h[?25l.46 it/s [?25h
+Iter:    47 [##############################]  128 /  128 | B.Loss: 3.90096e-01 | B.perf.: 300.02 it/s [?25h[?25l.47 it/s [?25h[?25l.83 it/s [?25h[?25l.29 it/s [?25h[?25l.96 it/s [?25h[?25l.24 it/s [?25h[?25l.37 it/s [?25h[?25l.75 it/s [?25h[?25l.47 it/s [?25h[?25l.03 it/s [?25h[?25l.40 it/s [?25h[?25l.90 it/s [?25h[?25l.79 it/s [?25h[?25l.98 it/s [?25h[?25l.65 it/s [?25h[?25l.03 it/s [?25h[?25l.58 it/s [?25h[?25l.74 it/s [?25h[?25l.84 it/s [?25h[?25l.40 it/s [?25h[?25l.66 it/s [?25h[?25l.20 it/s [?25h[?25l.79 it/s [?25h[?25l.68 it/s [?25h[?25l.34 it/s [?25h[?25l.01 it/s [?25h[?25l.90 it/s [?25h[?25l.37 it/s [?25h[?25l.85 it/s [?25h
+Iter:    48 [##############################]  128 /  128 | B.Loss: 2.73674e-01 | B.perf.: 292.08 it/s [?25h[?25l.69 it/s [?25h[?25l.10 it/s [?25h[?25l.81 it/s [?25h[?25l.33 it/s [?25h[?25l.91 it/s [?25h[?25l.23 it/s [?25h[?25l.30 it/s [?25h[?25l.73 it/s [?25h[?25l.53 it/s [?25h[?25l.80 it/s [?25h[?25l.77 it/s [?25h[?25l.30 it/s [?25h[?25l.06 it/s [?25h[?25l.54 it/s [?25h[?25l.25 it/s [?25h[?25l.53 it/s [?25h[?25l.61 it/s [?25h[?25l.57 it/s [?25h[?25l.85 it/s [?25h[?25l.09 it/s [?25h[?25l.44 it/s [?25h[?25l.68 it/s [?25h[?25l.31 it/s [?25h[?25l.18 it/s [?25h[?25l.06 it/s [?25h[?25l.52 it/s [?25h[?25l.17 it/s [?25h[?25l.76 it/s [?25h
+Iter:    49 [##############################]  128 /  128 | B.Loss: 4.67525e-01 | B.perf.: 338.13 it/s [?25h[?25l.31 it/s [?25h[?25l.93 it/s [?25h[?25l.33 it/s [?25h[?25l.14 it/s [?25h[?25l.05 it/s [?25h[?25l.74 it/s [?25h[?25l.72 it/s [?25h[?25l.70 it/s [?25h[?25l.28 it/s [?25h[?25l.21 it/s [?25h[?25l.67 it/s [?25h[?25l.65 it/s [?25h[?25l.05 it/s [?25h[?25l.13 it/s [?25h[?25l.76 it/s [?25h[?25l.17 it/s [?25h[?25l.58 it/s [?25h[?25l.25 it/s [?25h[?25l.62 it/s [?25h[?25l.46 it/s [?25h[?25l.78 it/s [?25h[?25l.66 it/s [?25h[?25l.71 it/s [?25h[?25l.65 it/s [?25h[?25l.57 it/s [?25h[?25l.75 it/s [?25h[?25l.08 it/s [?25h[?25l.40 it/s [?25h
+Iter:    50 [##############################]  128 /  128 | B.Loss: 4.04751e-01 | B.perf.: 307.90 it/s [?25h[?25l.92 it/s [?25h[?25l.02 it/s [?25h[?25l.86 it/s [?25h[?25l.29 it/s [?25h[?25l.51 it/s [?25h[?25l.73 it/s [?25h[?25l.24 it/s [?25h[?25l.58 it/s [?25h[?25l.69 it/s [?25h[?25l.19 it/s [?25h[?25l.66 it/s [?25h[?25l.48 it/s [?25h[?25l.40 it/s [?25h[?25l.96 it/s [?25h[?25l.45 it/s [?25h[?25l.28 it/s [?25h[?25l.88 it/s [?25h[?25l.06 it/s [?25h[?25l.04 it/s [?25h[?25l.66 it/s [?25h[?25l.75 it/s [?25h[?25l.80 it/s [?25h[?25l.29 it/s [?25h[?25l.18 it/s [?25h[?25l.76 it/s [?25h[?25l.00 it/s [?25h[?25l.43 it/s [?25h[?25l.54 it/s [?25h
+              Average Training perf.: 309.86 it/s | Mean Loss: 3.94546e-01 | Learning rate: 2.93017e-04 | Weight decay: 0.01000
+Fwd :    50 [##############################]   64 /   64 | B.Loss: 2.34844e-01 | B.perf.: 742.35 it/s [?25h[?25l.78 it/s [?25h[?25l.15 it/s [?25h[?25l.54 it/s [?25h[?25l.55 it/s [?25h[?25l.31 it/s [?25h[?25l.74 it/s [?25h[?25l.86 it/s [?25h[?25l.07 it/s [?25h[?25l.97 it/s [?25h[?25l.33 it/s [?25h[?25l.40 it/s [?25h[?25l.86 it/s [?25h[?25l.96 it/s [?25h[?25l.52 it/s [?25h[?25l.27 it/s [?25h[?25l.36 it/s [?25h[?25l.75 it/s [?25h[?25l.35 it/s [?25h[?25l.72 it/s [?25h[?25l.93 it/s [?25h[?25l.77 it/s [?25h[?25l.96 it/s [?25h[?25l.21 it/s [?25h[?25l.95 it/s [?25h[?25l.66 it/s [?25h[?25l.80 it/s [?25h[?25l.35 it/s [?25h[?25l.36 it/s [?25h
+              Average forward perf.: 678.33 it/s | Mean Loss: 3.45769e-01
+
+   *******  ConfMat  *******   Recall
+          830 |     194 |      81.05%
+           78 |     946 |      92.38%
+Prec.   91.41%    82.98%  Acc  86.72%
+
+Iter:    51 [##############################]  128 /  128 | B.Loss: 4.42896e-01 | B.perf.: 320.76 it/s [?25h[?25l.57 it/s [?25h[?25l.22 it/s [?25h[?25l.57 it/s [?25h[?25l.02 it/s [?25h[?25l.27 it/s [?25h[?25l.92 it/s [?25h[?25l.93 it/s [?25h[?25l.15 it/s [?25h[?25l.97 it/s [?25h[?25l.28 it/s [?25h[?25l.80 it/s [?25h[?25l.52 it/s [?25h[?25l.53 it/s [?25h[?25l.56 it/s [?25h[?25l.30 it/s [?25h[?25l.45 it/s [?25h[?25l.95 it/s [?25h[?25l.76 it/s [?25h[?25l.23 it/s [?25h[?25l.95 it/s [?25h[?25l.71 it/s [?25h[?25l.03 it/s [?25h[?25l.00 it/s [?25h[?25l.38 it/s [?25h[?25l.93 it/s [?25h[?25l.11 it/s [?25h[?25l.70 it/s [?25h[?25l.03 it/s [?25h
+Iter:    52 [##############################]  128 /  128 | B.Loss: 3.48618e-01 | B.perf.: 304.49 it/s [?25h[?25l.60 it/s [?25h[?25l.70 it/s [?25h[?25l.03 it/s [?25h[?25l.31 it/s [?25h[?25l.18 it/s [?25h[?25l.01 it/s [?25h[?25l.23 it/s [?25h[?25l.60 it/s [?25h[?25l.24 it/s [?25h[?25l.16 it/s [?25h[?25l.62 it/s [?25h[?25l.86 it/s [?25h[?25l.96 it/s [?25h[?25l.00 it/s [?25h[?25l.67 it/s [?25h[?25l.42 it/s [?25h[?25l.31 it/s [?25h[?25l.81 it/s [?25h[?25l.92 it/s [?25h[?25l.00 it/s [?25h[?25l.70 it/s [?25h[?25l.96 it/s [?25h[?25l.66 it/s [?25h[?25l.98 it/s [?25h[?25l.16 it/s [?25h[?25l.65 it/s [?25h[?25l.42 it/s [?25h[?25l.30 it/s [?25h
+Iter:    53 [##############################]  128 /  128 | B.Loss: 3.97357e-01 | B.perf.: 329.52 it/s [?25h[?25l.46 it/s [?25h[?25l.34 it/s [?25h[?25l.38 it/s [?25h[?25l.09 it/s [?25h[?25l.28 it/s [?25h[?25l.44 it/s [?25h[?25l.11 it/s [?25h[?25l.01 it/s [?25h[?25l.65 it/s [?25h[?25l.09 it/s [?25h[?25l.22 it/s [?25h[?25l.80 it/s [?25h[?25l.98 it/s [?25h[?25l.68 it/s [?25h[?25l.66 it/s [?25h[?25l.82 it/s [?25h[?25l.03 it/s [?25h[?25l.75 it/s [?25h[?25l.53 it/s [?25h[?25l.20 it/s [?25h[?25l.10 it/s [?25h[?25l.81 it/s [?25h[?25l.73 it/s [?25h[?25l.48 it/s [?25h[?25l.57 it/s [?25h[?25l.45 it/s [?25h[?25l.59 it/s [?25h[?25l.05 it/s [?25h
+Iter:    54 [##############################]  128 /  128 | B.Loss: 3.37053e-01 | B.perf.: 308.94 it/s [?25h[?25l.09 it/s [?25h[?25l.73 it/s [?25h[?25l.23 it/s [?25h[?25l.14 it/s [?25h[?25l.71 it/s [?25h[?25l.36 it/s [?25h[?25l.23 it/s [?25h[?25l.74 it/s [?25h[?25l.25 it/s [?25h[?25l.38 it/s [?25h[?25l]   52 /  128 | B.Loss: 3.32827e-01 | B.perf.: 332.95 it/s [?25h[?25l.98 it/s [?25h[?25l.64 it/s [?25h[?25l.83 it/s [?25h[?25l.67 it/s [?25h[?25l.53 it/s [?25h[?25l.11 it/s [?25h[?25l.05 it/s [?25h[?25l.96 it/s [?25h[?25l.84 it/s [?25h[?25l.13 it/s [?25h[?25l.38 it/s [?25h[?25l.14 it/s [?25h[?25l.28 it/s [?25h[?25l.14 it/s [?25h[?25l.97 it/s [?25h[?25l.10 it/s [?25h[?25l.16 it/s [?25h
+Iter:    55 [##############################]  128 /  128 | B.Loss: 3.42507e-01 | B.perf.: 308.91 it/s [?25h[?25l.55 it/s [?25h[?25l.36 it/s [?25h[?25l.17 it/s [?25h[?25l.69 it/s [?25h[?25l.66 it/s [?25h[?25l.59 it/s [?25h[?25l.38 it/s [?25h[?25l.40 it/s [?25h[?25l.50 it/s [?25h[?25l.12 it/s [?25h[?25l.05 it/s [?25h[?25l.05 it/s [?25h[?25l.42 it/s [?25h[?25l.66 it/s [?25h[?25l.70 it/s [?25h[?25l.91 it/s [?25h[?25l.59 it/s [?25h[?25l.92 it/s [?25h[?25l.84 it/s [?25h[?25l.67 it/s [?25h[?25l.95 it/s [?25h[?25l.09 it/s [?25h[?25l.30 it/s [?25h[?25l.19 it/s [?25h[?25l.55 it/s [?25h[?25l.16 it/s [?25h[?25l.45 it/s [?25h[?25l.14 it/s [?25h
+Iter:    56 [##############################]  128 /  128 | B.Loss: 4.31553e-01 | B.perf.: 323.45 it/s [?25h[?25l.69 it/s [?25h[?25l.10 it/s [?25h[?25l.64 it/s [?25h[?25l.88 it/s [?25h[?25l.17 it/s [?25h[?25l.63 it/s [?25h[?25l.44 it/s [?25h[?25l.40 it/s [?25h[?25l.61 it/s [?25h[?25l.77 it/s [?25h[?25l.45 it/s [?25h[?25l.78 it/s [?25h[?25l.70 it/s [?25h[?25l.13 it/s [?25h[?25l.48 it/s [?25h[?25l.92 it/s [?25h[?25l.33 it/s [?25h[?25l.87 it/s [?25h[?25l.50 it/s [?25h[?25l.81 it/s [?25h[?25l.74 it/s [?25h[?25l.96 it/s [?25h[?25l.39 it/s [?25h[?25l.05 it/s [?25h[?25l.66 it/s [?25h[?25l.18 it/s [?25h[?25l.30 it/s [?25h[?25l.81 it/s [?25h
+Iter:    57 [##############################]  128 /  128 | B.Loss: 4.16424e-01 | B.perf.: 330.94 it/s [?25h[?25l.56 it/s [?25h[?25l.24 it/s [?25h[?25l.04 it/s [?25h[?25l.96 it/s [?25h[?25l.58 it/s [?25h[?25l.09 it/s [?25h[?25l.82 it/s [?25h[?25l.04 it/s [?25h[?25l.93 it/s [?25h[?25l.51 it/s [?25h[?25l.50 it/s [?25h[?25l.86 it/s [?25h[?25l.21 it/s [?25h[?25l.55 it/s [?25h[?25l.97 it/s [?25h[?25l.89 it/s [?25h[?25l.33 it/s [?25h[?25l.84 it/s [?25h[?25l.23 it/s [?25h[?25l.47 it/s [?25h[?25l.51 it/s [?25h[?25l.26 it/s [?25h[?25l.50 it/s [?25h[?25l.43 it/s [?25h[?25l.31 it/s [?25h[?25l.87 it/s [?25h[?25l.45 it/s [?25h[?25l.06 it/s [?25h
+Iter:    58 [##############################]  128 /  128 | B.Loss: 3.53373e-01 | B.perf.: 320.58 it/s [?25h[?25l.20 it/s [?25h[?25l.58 it/s [?25h[?25l.64 it/s [?25h[?25l.75 it/s [?25h[?25l.42 it/s [?25h[?25l.82 it/s [?25h[?25l.00 it/s [?25h[?25l.80 it/s [?25h[?25l.53 it/s [?25h[?25l.89 it/s [?25h[?25l.90 it/s [?25h[?25l.80 it/s [?25h[?25l.21 it/s [?25h[?25l.85 it/s [?25h[?25l.24 it/s [?25h[?25l.31 it/s [?25h[?25l.38 it/s [?25h[?25l.88 it/s [?25h[?25l.85 it/s [?25h[?25l.96 it/s [?25h[?25l.03 it/s [?25h[?25l.64 it/s [?25h[?25l.69 it/s [?25h[?25l.22 it/s [?25h[?25l.82 it/s [?25h[?25l.90 it/s [?25h[?25l.63 it/s [?25h[?25l.98 it/s [?25h
+Iter:    59 [##############################]  128 /  128 | B.Loss: 4.34212e-01 | B.perf.: 332.12 it/s [?25h[?25l.13 it/s [?25h[?25l.02 it/s [?25h[?25l.77 it/s [?25h[?25l.54 it/s [?25h[?25l.02 it/s [?25h[?25l.92 it/s [?25h[?25l.05 it/s [?25h[?25l.53 it/s [?25h[?25l.15 it/s [?25h[?25l.73 it/s [?25h[?25l.66 it/s [?25h[?25l.86 it/s [?25h[?25l.06 it/s [?25h[?25l.86 it/s [?25h[?25l.39 it/s [?25h[?25l.46 it/s [?25h[?25l.32 it/s [?25h[?25l.20 it/s [?25h[?25l.56 it/s [?25h[?25l.19 it/s [?25h[?25l.21 it/s [?25h[?25l.53 it/s [?25h[?25l.80 it/s [?25h[?25l.68 it/s [?25h[?25l.54 it/s [?25h[?25l.97 it/s [?25h[?25l.37 it/s [?25h[?25l.32 it/s [?25h
+Iter:    60 [##############################]  128 /  128 | B.Loss: 3.56449e-01 | B.perf.: 296.64 it/s [?25h[?25l.99 it/s [?25h[?25l.53 it/s [?25h[?25l.15 it/s [?25h[?25l.70 it/s [?25h[?25l.81 it/s [?25h[?25l.52 it/s [?25h[?25l.41 it/s [?25h[?25l.81 it/s [?25h[?25l.70 it/s [?25h[?25l.56 it/s [?25h[?25l.80 it/s [?25h[?25l.80 it/s [?25h[?25l.00 it/s [?25h[?25l.72 it/s [?25h[?25l.10 it/s [?25h[?25l.23 it/s [?25h[?25l.43 it/s [?25h[?25l.79 it/s [?25h[?25l.25 it/s [?25h[?25l.31 it/s [?25h[?25l.79 it/s [?25h[?25l.35 it/s [?25h[?25l.36 it/s [?25h[?25l.09 it/s [?25h[?25l.70 it/s [?25h[?25l.35 it/s [?25h[?25l.35 it/s [?25h[?25l.23 it/s [?25h
+Iter:    61 [##############################]  128 /  128 | B.Loss: 3.33321e-01 | B.perf.: 346.09 it/s [?25h[?25l.30 it/s [?25h[?25l.35 it/s [?25h[?25l.25 it/s [?25h[?25l.98 it/s [?25h[?25l.61 it/s [?25h[?25l.54 it/s [?25h[?25l.98 it/s [?25h[?25l.35 it/s [?25h[?25l.29 it/s [?25h[?25l.23 it/s [?25h[?25l.84 it/s [?25h[?25l.06 it/s [?25h[?25l.73 it/s [?25h[?25l.21 it/s [?25h[?25l.67 it/s [?25h[?25l.90 it/s [?25h[?25l.50 it/s [?25h[?25l.92 it/s [?25h[?25l.37 it/s [?25h[?25l.65 it/s [?25h[?25l.05 it/s [?25h[?25l.56 it/s [?25h[?25l.85 it/s [?25h[?25l.16 it/s [?25h[?25l.79 it/s [?25h[?25l.21 it/s [?25h[?25l.63 it/s [?25h[?25l.73 it/s [?25h
+Iter:    62 [##############################]  128 /  128 | B.Loss: 4.06745e-01 | B.perf.: 336.47 it/s [?25h[?25l.99 it/s [?25h[?25l.72 it/s [?25h[?25l.26 it/s [?25h[?25l.02 it/s [?25h[?25l.71 it/s [?25h[?25l.20 it/s [?25h[?25l.80 it/s [?25h[?25l.92 it/s [?25h[?25l.44 it/s [?25h[?25l.55 it/s [?25h[?25l.69 it/s [?25h[?25l.48 it/s [?25h[?25l.46 it/s [?25h[?25l.91 it/s [?25h[?25l.80 it/s [?25h[?25l.92 it/s [?25h[?25l.66 it/s [?25h[?25l.31 it/s [?25h[?25l.51 it/s [?25h[?25l.92 it/s [?25h[?25l.27 it/s [?25h[?25l.83 it/s [?25h[?25l.46 it/s [?25h[?25l.52 it/s [?25h[?25l.65 it/s [?25h[?25l.58 it/s [?25h[?25l.18 it/s [?25h[?25l.12 it/s [?25h
+Iter:    63 [##############################]  128 /  128 | B.Loss: 3.72684e-01 | B.perf.: 314.06 it/s [?25h[?25l.45 it/s [?25h[?25l.02 it/s [?25h[?25l.33 it/s [?25h[?25l.40 it/s [?25h[?25l.51 it/s [?25h[?25l.29 it/s [?25h[?25l.62 it/s [?25h[?25l.85 it/s [?25h[?25l.36 it/s [?25h[?25l.94 it/s [?25h[?25l.17 it/s [?25h[?25l.96 it/s [?25h[?25l.16 it/s [?25h[?25l.78 it/s [?25h[?25l.86 it/s [?25h[?25l.29 it/s [?25h[?25l.78 it/s [?25h[?25l.43 it/s [?25h[?25l.52 it/s [?25h[?25l.69 it/s [?25h[?25l.00 it/s [?25h[?25l.35 it/s [?25h[?25l.18 it/s [?25h[?25l.41 it/s [?25h[?25l.49 it/s [?25h[?25l.43 it/s [?25h[?25l.57 it/s [?25h[?25l.77 it/s [?25h
+Iter:    64 [##############################]  128 /  128 | B.Loss: 3.23227e-01 | B.perf.: 336.06 it/s [?25h[?25l.46 it/s [?25h[?25l.40 it/s [?25h[?25l.47 it/s [?25h[?25l.42 it/s [?25h[?25l.79 it/s [?25h[?25l.26 it/s [?25h[?25l.26 it/s [?25h[?25l.67 it/s [?25h[?25l.66 it/s [?25h[?25l.14 it/s [?25h[?25l.42 it/s [?25h[?25l.70 it/s [?25h[?25l.60 it/s [?25h[?25l.22 it/s [?25h[?25l.77 it/s [?25h[?25l.37 it/s [?25h[?25l.56 it/s [?25h[?25l.33 it/s [?25h[?25l.72 it/s [?25h[?25l.97 it/s [?25h[?25l.08 it/s [?25h[?25l.63 it/s [?25h[?25l.07 it/s [?25h[?25l.01 it/s [?25h[?25l.04 it/s [?25h[?25l.42 it/s [?25h[?25l.09 it/s [?25h[?25l.64 it/s [?25h
+Iter:    65 [##############################]  128 /  128 | B.Loss: 3.55094e-01 | B.perf.: 324.64 it/s [?25h[?25l.40 it/s [?25h[?25l.27 it/s [?25h[?25l.38 it/s [?25h[?25l.83 it/s [?25h[?25l.02 it/s [?25h[?25l.01 it/s [?25h[?25l.67 it/s [?25h[?25l.07 it/s [?25h[?25l.84 it/s [?25h[?25l.98 it/s [?25h[?25l.58 it/s [?25h[?25l.79 it/s [?25h[?25l.21 it/s [?25h[?25l.04 it/s [?25h[?25l.45 it/s [?25h[?25l.69 it/s [?25h[?25l.03 it/s [?25h[?25l.87 it/s [?25h[?25l.58 it/s [?25h[?25l.36 it/s [?25h[?25l.53 it/s [?25h[?25l.39 it/s [?25h[?25l.27 it/s [?25h[?25l.04 it/s [?25h[?25l.36 it/s [?25h[?25l.45 it/s [?25h[?25l.92 it/s [?25h[?25l.74 it/s [?25h
+Iter:    66 [##############################]  128 /  128 | B.Loss: 3.84580e-01 | B.perf.: 320.28 it/s [?25h[?25l.62 it/s [?25h[?25l.70 it/s [?25h[?25l.86 it/s [?25h[?25l.18 it/s [?25h[?25l.76 it/s [?25h[?25l.74 it/s [?25h[?25l.20 it/s [?25h[?25l.84 it/s [?25h[?25l.46 it/s [?25h[?25l.92 it/s [?25h[?25l.20 it/s [?25h[?25l.98 it/s [?25h[?25l.09 it/s [?25h[?25l.74 it/s [?25h[?25l.67 it/s [?25h[?25l.72 it/s [?25h[?25l.52 it/s [?25h[?25l.26 it/s [?25h[?25l.76 it/s [?25h[?25l.77 it/s [?25h[?25l.53 it/s [?25h[?25l.64 it/s [?25h[?25l.24 it/s [?25h[?25l.00 it/s [?25h[?25l.16 it/s [?25h[?25l.56 it/s [?25h[?25l.49 it/s [?25h[?25l.00 it/s [?25h
+Iter:    67 [##############################]  128 /  128 | B.Loss: 3.66386e-01 | B.perf.: 309.45 it/s [?25h[?25l.09 it/s [?25h[?25l.39 it/s [?25h[?25l.79 it/s [?25h[?25l.67 it/s [?25h[?25l.98 it/s [?25h[?25l.39 it/s [?25h[?25l.37 it/s [?25h[?25l.88 it/s [?25h[?25l.47 it/s [?25h[?25l.29 it/s [?25h[?25l.04 it/s [?25h[?25l.27 it/s [?25h[?25l.32 it/s [?25h[?25l.71 it/s [?25h[?25l.30 it/s [?25h[?25l.54 it/s [?25h[?25l.43 it/s [?25h[?25l.76 it/s [?25h[?25l.35 it/s [?25h[?25l.86 it/s [?25h[?25l.06 it/s [?25h[?25l.44 it/s [?25h[?25l.55 it/s [?25h[?25l.81 it/s [?25h[?25l.78 it/s [?25h[?25l.38 it/s [?25h[?25l.69 it/s [?25h[?25l.38 it/s [?25h
+Iter:    68 [##############################]  128 /  128 | B.Loss: 3.71410e-01 | B.perf.: 308.31 it/s [?25h[?25l.09 it/s [?25h[?25l.76 it/s [?25h[?25l/s [?25h[?25l.41 it/s [?25h[?25l.44 it/s [?25h[?25l.90 it/s [?25h[?25l.11 it/s [?25h[?25l.06 it/s [?25h[?25l.15 it/s [?25h[?25l.31 it/s [?25h[?25l.60 it/s [?25h[?25l.78 it/s [?25h[?25l.77 it/s [?25h[?25l.91 it/s [?25h[?25l.03 it/s [?25h[?25l.33 it/s [?25h[?25l.80 it/s [?25h[?25l.23 it/s [?25h[?25l.45 it/s [?25h[?25l.13 it/s [?25h[?25l.19 it/s [?25h[?25l.68 it/s [?25h[?25l.13 it/s [?25h[?25l.57 it/s [?25h[?25l.81 it/s [?25h[?25l.12 it/s [?25h[?25l.14 it/s [?25h[?25l.28 it/s [?25h
+Iter:    69 [##############################]  128 /  128 | B.Loss: 3.33718e-01 | B.perf.: 322.09 it/s [?25h[?25l.87 it/s [?25h[?25l.07 it/s [?25h[?25l.15 it/s [?25h[?25l.81 it/s [?25h[?25l.19 it/s [?25h[?25l.50 it/s [?25h[?25l.62 it/s [?25h[?25l.32 it/s [?25h[?25l.51 it/s [?25h[?25l.26 it/s [?25h[?25l.55 it/s [?25h[?25l.60 it/s [?25h[?25l.20 it/s [?25h[?25l.98 it/s [?25h[?25l.99 it/s [?25h[?25l.83 it/s [?25h[?25l.56 it/s [?25h[?25l.08 it/s [?25h[?25l.50 it/s [?25h[?25l.86 it/s [?25h[?25l.96 it/s [?25h[?25l.30 it/s [?25h[?25l.37 it/s [?25h[?25l.35 it/s [?25h[?25l.03 it/s [?25h[?25l.39 it/s [?25h[?25l.59 it/s [?25h[?25l.27 it/s [?25h
+Iter:    70 [##############################]  128 /  128 | B.Loss: 3.02975e-01 | B.perf.: 307.46 it/s [?25h[?25l.51 it/s [?25h[?25l.24 it/s [?25h[?25l.10 it/s [?25h[?25l.05 it/s [?25h[?25l.62 it/s [?25h[?25l.84 it/s [?25h[?25l.58 it/s [?25h[?25l.78 it/s [?25h[?25l.59 it/s [?25h[?25l.20 it/s [?25h[?25l.92 it/s [?25h[?25l.43 it/s [?25h[?25l.30 it/s [?25h[?25l.03 it/s [?25h[?25l.64 it/s [?25h[?25l.48 it/s [?25h[?25l.78 it/s [?25h[?25l.09 it/s [?25h[?25l.12 it/s [?25h[?25l.26 it/s [?25h[?25l.57 it/s [?25h[?25l.06 it/s [?25h[?25l.79 it/s [?25h[?25l.87 it/s [?25h[?25l.23 it/s [?25h[?25l.80 it/s [?25h[?25l.99 it/s [?25h[?25l.31 it/s [?25h
+Iter:    71 [##############################]  128 /  128 | B.Loss: 4.54251e-01 | B.perf.: 279.90 it/s [?25h[?25l.49 it/s [?25h[?25l.86 it/s [?25h[?25l.31 it/s [?25h[?25l.98 it/s [?25h[?25l.31 it/s [?25h[?25l.20 it/s [?25h[?25l.43 it/s [?25h[?25l.26 it/s [?25h[?25l.11 it/s [?25h[?25l.03 it/s [?25h[?25l.64 it/s [?25h[?25l.16 it/s [?25h[?25l.71 it/s [?25h[?25l.08 it/s [?25h[?25l.61 it/s [?25h[?25l.75 it/s [?25h[?25l.87 it/s [?25h[?25l.21 it/s [?25h[?25l.65 it/s [?25h[?25l.71 it/s [?25h[?25l.01 it/s [?25h[?25l.09 it/s [?25h[?25l.42 it/s [?25h[?25l.76 it/s [?25h[?25l.23 it/s [?25h[?25l.74 it/s [?25h[?25l.68 it/s [?25h[?25l.89 it/s [?25h
+Iter:    72 [##############################]  128 /  128 | B.Loss: 2.58081e-01 | B.perf.: 288.39 it/s [?25h[?25l.28 it/s [?25h[?25l.31 it/s [?25h[?25l.37 it/s [?25h[?25l.68 it/s [?25h[?25l.41 it/s [?25h[?25l.24 it/s [?25h[?25l.11 it/s [?25h[?25l.70 it/s [?25h[?25l.99 it/s [?25h[?25l.41 it/s [?25h[?25l.85 it/s [?25h[?25l.21 it/s [?25h[?25l.65 it/s [?25h[?25l.34 it/s [?25h[?25l.54 it/s [?25h[?25l.96 it/s [?25h[?25l.16 it/s [?25h[?25l.15 it/s [?25h[?25l.06 it/s [?25h[?25l.14 it/s [?25h[?25l.98 it/s [?25h[?25l.03 it/s [?25h[?25l.42 it/s [?25h[?25l.89 it/s [?25h[?25l.12 it/s [?25h[?25l.34 it/s [?25h[?25l.24 it/s [?25h[?25l.39 it/s [?25h
+Iter:    73 [##############################]  128 /  128 | B.Loss: 3.71893e-01 | B.perf.: 308.27 it/s [?25h[?25l.30 it/s [?25h[?25l.50 it/s [?25h[?25l.30 it/s [?25h[?25l.05 it/s [?25h[?25l.35 it/s [?25h[?25l.19 it/s [?25h[?25l.46 it/s [?25h[?25l.06 it/s [?25h[?25l.65 it/s [?25h[?25l.32 it/s [?25h[?25l.32 it/s [?25h[?25l.98 it/s [?25h[?25l.14 it/s [?25h[?25l.06 it/s [?25h[?25l.29 it/s [?25h[?25l.22 it/s [?25h[?25l.18 it/s [?25h[?25l.72 it/s [?25h[?25l.27 it/s [?25h[?25l.83 it/s [?25h[?25l.10 it/s [?25h[?25l.85 it/s [?25h[?25l.15 it/s [?25h[?25l.01 it/s [?25h[?25l.48 it/s [?25h[?25l.79 it/s [?25h[?25l.40 it/s [?25h[?25l.09 it/s [?25h
+Iter:    74 [##############################]  128 /  128 | B.Loss: 3.36135e-01 | B.perf.: 281.93 it/s [?25h[?25l.62 it/s [?25h[?25l.76 it/s [?25h[?25l.59 it/s [?25h[?25l.21 it/s [?25h[?25l.89 it/s [?25h[?25l.67 it/s [?25h[?25l.82 it/s [?25h[?25l.88 it/s [?25h[?25l.20 it/s [?25h[?25l.39 it/s [?25h[?25l.05 it/s [?25h[?25l.16 it/s [?25h[?25l.81 it/s [?25h[?25l.27 it/s [?25h[?25l.13 it/s [?25h[?25l.82 it/s [?25h[?25l.61 it/s [?25h[?25l.69 it/s [?25h[?25l.74 it/s [?25h[?25l.27 it/s [?25h[?25l.05 it/s [?25h[?25l.14 it/s [?25h[?25l.90 it/s [?25h[?25l.80 it/s [?25h[?25l.97 it/s [?25h[?25l.78 it/s [?25h[?25l.01 it/s [?25h[?25l.35 it/s [?25h
+Iter:    75 [##############################]  128 /  128 | B.Loss: 3.24512e-01 | B.perf.: 296.02 it/s [?25h[?25l.56 it/s [?25h[?25l.58 it/s [?25h[?25l.28 it/s [?25h[?25l.43 it/s [?25h[?25l.78 it/s [?25h[?25l.67 it/s [?25h[?25l.77 it/s [?25h[?25l.81 it/s [?25h[?25l.77 it/s [?25h[?25l.88 it/s [?25h[?25l.30 it/s [?25h[?25l.41 it/s [?25h[?25l.49 it/s [?25h[?25l.84 it/s [?25h[?25l.29 it/s [?25h[?25l.08 it/s [?25h[?25l.47 it/s [?25h[?25l.09 it/s [?25h[?25l.16 it/s [?25h[?25l.67 it/s [?25h[?25l.03 it/s [?25h[?25l.72 it/s [?25h[?25l.48 it/s [?25h[?25l.58 it/s [?25h[?25l.56 it/s [?25h[?25l.04 it/s [?25h[?25l.82 it/s [?25h[?25l.92 it/s [?25h
+Iter:    76 [##############################]  128 /  128 | B.Loss: 2.60843e-01 | B.perf.: 303.85 it/s [?25h[?25l.18 it/s [?25h[?25l.89 it/s [?25h[?25l.88 it/s [?25h[?25l.24 it/s [?25h[?25l.79 it/s [?25h[?25l.85 it/s [?25h[?25l.00 it/s [?25h[?25l.12 it/s [?25h[?25l.48 it/s [?25h[?25l.95 it/s [?25h[?25l.27 it/s [?25h[?25l.95 it/s [?25h[?25l.17 it/s [?25h[?25l.35 it/s [?25h[?25l.71 it/s [?25h[?25l.21 it/s [?25h[?25l.42 it/s [?25h[?25l.08 it/s [?25h[?25l.75 it/s [?25h[?25l.14 it/s [?25h[?25l.09 it/s [?25h[?25l.32 it/s [?25h[?25l.05 it/s [?25h[?25l.00 it/s [?25h[?25l.77 it/s [?25h[?25l.94 it/s [?25h[?25l.70 it/s [?25h[?25l.94 it/s [?25h
+Iter:    77 [##############################]  128 /  128 | B.Loss: 2.35722e-01 | B.perf.: 302.59 it/s [?25h[?25l.24 it/s [?25h[?25l.47 it/s [?25h[?25l.19 it/s [?25h[?25l.87 it/s [?25h[?25l.64 it/s [?25h[?25l.91 it/s [?25h[?25l.94 it/s [?25h[?25l.19 it/s [?25h[?25l.72 it/s [?25h[?25l.08 it/s [?25h[?25l.10 it/s [?25h[?25l.56 it/s [?25h[?25l.99 it/s [?25h[?25l.81 it/s [?25h[?25l.18 it/s [?25h[?25l.68 it/s [?25h[?25l.70 it/s [?25h[?25l.68 it/s [?25h[?25l.28 it/s [?25h[?25l.56 it/s [?25h[?25l.07 it/s [?25h[?25l.44 it/s [?25h[?25l.17 it/s [?25h[?25l.82 it/s [?25h[?25l.88 it/s [?25h[?25l.37 it/s [?25h[?25l.68 it/s [?25h[?25l.96 it/s [?25h
+Iter:    78 [##############################]  128 /  128 | B.Loss: 3.74187e-01 | B.perf.: 296.76 it/s [?25h[?25l.59 it/s [?25h[?25l.50 it/s [?25h[?25l.71 it/s [?25h[?25l.05 it/s [?25h[?25l.27 it/s [?25h[?25l.48 it/s [?25h[?25l.10 it/s [?25h[?25l.68 it/s [?25h[?25l.50 it/s [?25h[?25l.38 it/s [?25h[?25l.79 it/s [?25h[?25l.30 it/s [?25h[?25l.71 it/s [?25h[?25l.05 it/s [?25h[?25l.71 it/s [?25h[?25l.97 it/s [?25h[?25l.81 it/s [?25h[?25l.63 it/s [?25h[?25l.41 it/s [?25h[?25l.24 it/s [?25h[?25l.54 it/s [?25h[?25l.50 it/s [?25h[?25l.27 it/s [?25h[?25l.45 it/s [?25h[?25l.69 it/s [?25h[?25l.57 it/s [?25h[?25l.90 it/s [?25h[?25l.05 it/s [?25h
+Iter:    79 [##############################]  128 /  128 | B.Loss: 3.77202e-01 | B.perf.: 282.01 it/s [?25h[?25l.74 it/s [?25h[?25l.40 it/s [?25h[?25l.18 it/s [?25h[?25l.99 it/s [?25h[?25l.07 it/s [?25h[?25l.27 it/s [?25h[?25l.12 it/s [?25h[?25l.53 it/s [?25h[?25l.86 it/s [?25h[?25l.28 it/s [?25h[?25l.26 it/s [?25h[?25l.83 it/s [?25h[?25l.64 it/s [?25h[?25l.99 it/s [?25h[?25l.15 it/s [?25h[?25l.32 it/s [?25h[?25l.78 it/s [?25h[?25l.05 it/s [?25h[?25l.14 it/s [?25h[?25l.45 it/s [?25h[?25l.97 it/s [?25h[?25l.89 it/s [?25h[?25l.29 it/s [?25h[?25l.58 it/s [?25h[?25l.03 it/s [?25h[?25l.16 it/s [?25h[?25l.81 it/s [?25h[?25l.26 it/s [?25h
+Iter:    80 [##############################]  128 /  128 | B.Loss: 2.68971e-01 | B.perf.: 311.04 it/s [?25h[?25l.33 it/s [?25h[?25l.85 it/s [?25h[?25l.59 it/s [?25h[?25l.96 it/s [?25h[?25l.11 it/s [?25h[?25l.53 it/s [?25h[?25l.37 it/s [?25h[?25l.20 it/s [?25h[?25l.20 it/s [?25h[?25l.24 it/s [?25h[?25l.35 it/s [?25h[?25l.92 it/s [?25h[?25l.39 it/s [?25h[?25l.17 it/s [?25h[?25l.93 it/s [?25h[?25l.98 it/s [?25h[?25l.06 it/s [?25h[?25l.60 it/s [?25h[?25l.31 it/s [?25h[?25l.95 it/s [?25h[?25l.29 it/s [?25h[?25l.70 it/s [?25h[?25l.97 it/s [?25h[?25l.31 it/s [?25h[?25l.04 it/s [?25h[?25l.91 it/s [?25h[?25l.38 it/s [?25h[?25l.88 it/s [?25h
+Iter:    81 [##############################]  128 /  128 | B.Loss: 3.23551e-01 | B.perf.: 318.60 it/s [?25h[?25l.66 it/s [?25h[?25l/s [?25h[?25l.18 it/s [?25h[?25l.85 it/s [?25h[?25l.46 it/s [?25h[?25l.85 it/s [?25h[?25l.45 it/s [?25h[?25l.24 it/s [?25h[?25l.88 it/s [?25h[?25l.36 it/s [?25h[?25l.30 it/s [?25h[?25l.42 it/s [?25h[?25l.10 it/s [?25h[?25l.49 it/s [?25h[?25l.55 it/s [?25h[?25l.80 it/s [?25h[?25l.03 it/s [?25h[?25l.59 it/s [?25h[?25l.23 it/s [?25h[?25l.81 it/s [?25h[?25l.12 it/s [?25h[?25l.92 it/s [?25h[?25l.92 it/s [?25h[?25l.63 it/s [?25h[?25l.53 it/s [?25h[?25l.70 it/s [?25h[?25l.40 it/s [?25h[?25l.59 it/s [?25h
+Iter:    82 [##############################]  128 /  128 | B.Loss: 3.18713e-01 | B.perf.: 317.39 it/s [?25h[?25l.05 it/s [?25h[?25l.40 it/s [?25h[?25l.84 it/s [?25h[?25l.85 it/s [?25h[?25l.14 it/s [?25h[?25l.57 it/s [?25h[?25l.05 it/s [?25h[?25l.04 it/s [?25h[?25l.58 it/s [?25h[?25l.20 it/s [?25h[?25l.03 it/s [?25h[?25l.36 it/s [?25h[?25l.88 it/s [?25h[?25l.18 it/s [?25h[?25l.11 it/s [?25h[?25l.23 it/s [?25h[?25l.53 it/s [?25h[?25l.64 it/s [?25h[?25l.22 it/s [?25h[?25l.02 it/s [?25h[?25l.26 it/s [?25h[?25l.57 it/s [?25h[?25l.58 it/s [?25h[?25l.33 it/s [?25h[?25l.14 it/s [?25h[?25l.97 it/s [?25h[?25l.73 it/s [?25h[?25l.32 it/s [?25h
+Iter:    83 [##############################]  128 /  128 | B.Loss: 3.58976e-01 | B.perf.: 331.11 it/s [?25h[?25l.62 it/s [?25h[?25l.70 it/s [?25h[?25l.17 it/s [?25h[?25l.21 it/s [?25h[?25l.74 it/s [?25h[?25l.83 it/s [?25h[?25l.38 it/s [?25h[?25l.28 it/s [?25h[?25l.91 it/s [?25h[?25l.45 it/s [?25h[?25l.87 it/s [?25h[?25l.61 it/s [?25h[?25l.37 it/s [?25h[?25l.94 it/s [?25h[?25l.94 it/s [?25h[?25l.52 it/s [?25h[?25l.25 it/s [?25h[?25l.70 it/s [?25h[?25l.11 it/s [?25h[?25l.67 it/s [?25h[?25l.67 it/s [?25h[?25l.65 it/s [?25h[?25l.56 it/s [?25h[?25l.89 it/s [?25h[?25l.46 it/s [?25h[?25l.02 it/s [?25h[?25l.04 it/s [?25h[?25l.96 it/s [?25h
+Iter:    84 [##############################]  128 /  128 | B.Loss: 3.47684e-01 | B.perf.: 321.58 it/s [?25h[?25l.25 it/s [?25h[?25l.93 it/s [?25h[?25l.18 it/s [?25h[?25l.63 it/s [?25h[?25l.72 it/s [?25h[?25l.53 it/s [?25h[?25l.47 it/s [?25h[?25l.50 it/s [?25h[?25l.52 it/s [?25h[?25l.08 it/s [?25h[?25l.80 it/s [?25h[?25l.08 it/s [?25h[?25l.44 it/s [?25h[?25l.76 it/s [?25h[?25l.66 it/s [?25h[?25l.78 it/s [?25h[?25l.68 it/s [?25h[?25l.99 it/s [?25h[?25l.43 it/s [?25h[?25l.00 it/s [?25h[?25l.95 it/s [?25h[?25l/s [?25h[?25l.22 it/s [?25h[?25l.92 it/s [?25h[?25l.42 it/s [?25h[?25l.37 it/s [?25h[?25l.39 it/s [?25h[?25l.87 it/s [?25h
+Iter:    85 [##############################]  128 /  128 | B.Loss: 3.70804e-01 | B.perf.: 296.74 it/s [?25h[?25l.10 it/s [?25h[?25l.69 it/s [?25h[?25l.52 it/s [?25h[?25l.78 it/s [?25h[?25l.06 it/s [?25h[?25l.06 it/s [?25h[?25l.92 it/s [?25h[?25l.11 it/s [?25h[?25l.10 it/s [?25h[?25l.88 it/s [?25h[?25l.42 it/s [?25h[?25l.15 it/s [?25h[?25l.10 it/s [?25h[?25l.36 it/s [?25h[?25l.60 it/s [?25h[?25l.97 it/s [?25h[?25l.49 it/s [?25h[?25l.49 it/s [?25h[?25l.73 it/s [?25h[?25l.44 it/s [?25h[?25l.62 it/s [?25h[?25l.66 it/s [?25h[?25l.87 it/s [?25h[?25l.33 it/s [?25h[?25l.20 it/s [?25h[?25l.16 it/s [?25h[?25l.09 it/s [?25h[?25l.56 it/s [?25h
+Iter:    86 [##############################]  128 /  128 | B.Loss: 2.70854e-01 | B.perf.: 318.27 it/s [?25h[?25l.21 it/s [?25h[?25l.31 it/s [?25h[?25l.61 it/s [?25h[?25l.32 it/s [?25h[?25l.31 it/s [?25h[?25l.20 it/s [?25h[?25l.91 it/s [?25h[?25l.09 it/s [?25h[?25l.49 it/s [?25h[?25l.10 it/s [?25h[?25l.13 it/s [?25h[?25l.47 it/s [?25h[?25l.35 it/s [?25h[?25l.35 it/s [?25h[?25l.97 it/s [?25h[?25l.23 it/s [?25h[?25l.44 it/s [?25h[?25l.15 it/s [?25h[?25l.98 it/s [?25h[?25l.66 it/s [?25h[?25l.92 it/s [?25h[?25l.70 it/s [?25h[?25l.26 it/s [?25h[?25l.31 it/s [?25h[?25l.05 it/s [?25h[?25l.17 it/s [?25h[?25l.68 it/s [?25h[?25l.19 it/s [?25h
+Iter:    87 [##############################]  128 /  128 | B.Loss: 3.47308e-01 | B.perf.: 336.34 it/s [?25h[?25l.84 it/s [?25h[?25l.58 it/s [?25h[?25l.94 it/s [?25h[?25l.05 it/s [?25h[?25l.85 it/s [?25h[?25l.39 it/s [?25h[?25l.39 it/s [?25h[?25l.04 it/s [?25h[?25l.46 it/s [?25h[?25l.13 it/s [?25h[?25l.06 it/s [?25h[?25l.82 it/s [?25h[?25l.17 it/s [?25h[?25l.28 it/s [?25h[?25l.18 it/s [?25h[?25l.37 it/s [?25h[?25l.13 it/s [?25h[?25l.30 it/s [?25h[?25l.19 it/s [?25h[?25l.96 it/s [?25h[?25l.41 it/s [?25h[?25l.80 it/s [?25h[?25l.45 it/s [?25h[?25l.01 it/s [?25h[?25l.60 it/s [?25h[?25l.63 it/s [?25h[?25l.36 it/s [?25h[?25l.85 it/s [?25h
+Iter:    88 [##############################]  128 /  128 | B.Loss: 3.63655e-01 | B.perf.: 270.59 it/s [?25h[?25l.88 it/s [?25h[?25l.36 it/s [?25h[?25l.10 it/s [?25h[?25l.12 it/s [?25h[?25l.34 it/s [?25h[?25l.95 it/s [?25h[?25l.09 it/s [?25h[?25l.91 it/s [?25h[?25l.92 it/s [?25h[?25l.66 it/s [?25h[?25l.63 it/s [?25h[?25l.85 it/s [?25h[?25l.25 it/s [?25h[?25l.05 it/s [?25h[?25l.92 it/s [?25h[?25l.47 it/s [?25h[?25l.72 it/s [?25h[?25l.13 it/s [?25h[?25l.47 it/s [?25h[?25l.48 it/s [?25h[?25l.30 it/s [?25h[?25l.99 it/s [?25h[?25l.49 it/s [?25h[?25l.83 it/s [?25h[?25l.86 it/s [?25h[?25l.50 it/s [?25h[?25l.81 it/s [?25h[?25l.38 it/s [?25h
+Iter:    89 [##############################]  128 /  128 | B.Loss: 3.63356e-01 | B.perf.: 283.57 it/s [?25h[?25l.89 it/s [?25h[?25l.65 it/s [?25h[?25l.70 it/s [?25h[?25l.79 it/s [?25h[?25l.64 it/s [?25h[?25l.39 it/s [?25h[?25l.75 it/s [?25h[?25l.78 it/s [?25h[?25l.60 it/s [?25h[?25l.26 it/s [?25h[?25l.95 it/s [?25h[?25l.79 it/s [?25h[?25l.20 it/s [?25h[?25l.53 it/s [?25h[?25l.11 it/s [?25h[?25l.15 it/s [?25h[?25l.05 it/s [?25h[?25l.82 it/s [?25h[?25l.87 it/s [?25h[?25l.57 it/s [?25h[?25l.97 it/s [?25h[?25l.73 it/s [?25h[?25l.09 it/s [?25h[?25l.32 it/s [?25h[?25l.13 it/s [?25h[?25l.67 it/s [?25h[?25l.25 it/s [?25h[?25l.37 it/s [?25h
+Iter:    90 [##############################]  128 /  128 | B.Loss: 3.02765e-01 | B.perf.: 292.04 it/s [?25h[?25l.03 it/s [?25h[?25l.73 it/s [?25h[?25l.58 it/s [?25h[?25l.89 it/s [?25h[?25l.99 it/s [?25h[?25l.29 it/s [?25h[?25l.25 it/s [?25h[?25l.23 it/s [?25h[?25l.01 it/s [?25h[?25l.65 it/s [?25h[?25l.32 it/s [?25h[?25l.19 it/s [?25h[?25l.88 it/s [?25h[?25l.93 it/s [?25h[?25l.26 it/s [?25h[?25l.45 it/s [?25h[?25l.85 it/s [?25h[?25l.54 it/s [?25h[?25l.12 it/s [?25h[?25l.03 it/s [?25h[?25l.49 it/s [?25h[?25l.99 it/s [?25h[?25l.09 it/s [?25h[?25l.21 it/s [?25h[?25l.66 it/s [?25h[?25l.19 it/s [?25h[?25l.26 it/s [?25h[?25l.57 it/s [?25h
+Iter:    91 [##############################]  128 /  128 | B.Loss: 3.42695e-01 | B.perf.: 284.98 it/s [?25h[?25l.25 it/s [?25h[?25l.15 it/s [?25h[?25l.49 it/s [?25h[?25l.72 it/s [?25h[?25l.48 it/s [?25h[?25l.65 it/s [?25h[?25l.90 it/s [?25h[?25l.41 it/s [?25h[?25l.96 it/s [?25h[?25l.79 it/s [?25h[?25l.93 it/s [?25h[?25l.27 it/s [?25h[?25l.87 it/s [?25h[?25l.29 it/s [?25h[?25l.55 it/s [?25h[?25l.41 it/s [?25h[?25l.71 it/s [?25h[?25l.35 it/s [?25h[?25l.69 it/s [?25h[?25l.61 it/s [?25h[?25l.46 it/s [?25h[?25l.89 it/s [?25h[?25l.50 it/s [?25h[?25l.10 it/s [?25h[?25l.56 it/s [?25h[?25l.82 it/s [?25h[?25l.98 it/s [?25h[?25l.78 it/s [?25h
+Iter:    92 [##############################]  128 /  128 | B.Loss: 4.66985e-01 | B.perf.: 328.74 it/s [?25h[?25l.12 it/s [?25h[?25l.27 it/s [?25h[?25l.74 it/s [?25h[?25l.02 it/s [?25h[?25l.95 it/s [?25h[?25l.27 it/s [?25h[?25l.65 it/s [?25h[?25l.38 it/s [?25h[?25l.10 it/s [?25h[?25l.93 it/s [?25h[?25l.13 it/s [?25h[?25l.81 it/s [?25h[?25l.76 it/s [?25h[?25l.84 it/s [?25h[?25l.19 it/s [?25h[?25l.56 it/s [?25h[?25l.66 it/s [?25h[?25l.26 it/s [?25h[?25l.83 it/s [?25h[?25l.61 it/s [?25h[?25l.71 it/s [?25h[?25l.04 it/s [?25h[?25l.73 it/s [?25h[?25l.92 it/s [?25h[?25l.53 it/s [?25h[?25l.15 it/s [?25h[?25l.71 it/s [?25h[?25l.96 it/s [?25h
+Iter:    93 [##############################]  128 /  128 | B.Loss: 3.98246e-01 | B.perf.: 307.78 it/s [?25h[?25l.88 it/s [?25h[?25l.31 it/s [?25h[?25l.86 it/s [?25h[?25l.82 it/s [?25h[?25l.51 it/s [?25h[?25l.78 it/s [?25h[?25l.84 it/s [?25h[?25l.40 it/s [?25h[?25l.11 it/s [?25h[?25l.23 it/s [?25h[?25l.60 it/s [?25h[?25l.71 it/s [?25h[?25l.32 it/s [?25h[?25l.31 it/s [?25h[?25l.78 it/s [?25h[?25l.52 it/s [?25h[?25l.85 it/s [?25h[?25l.22 it/s [?25h[?25l.16 it/s [?25h[?25l.85 it/s [?25h[?25l.05 it/s [?25h[?25l.52 it/s [?25h[?25l.62 it/s [?25h[?25l.76 it/s [?25h[?25l.17 it/s [?25h[?25l.67 it/s [?25h[?25l.65 it/s [?25h[?25l.78 it/s [?25h
+Iter:    94 [##############################]  128 /  128 | B.Loss: 4.48607e-01 | B.perf.: 313.91 it/s [?25h[?25l.00 it/s [?25h[?25l.55 it/s [?25h[?25l.68 it/s [?25h[?25l.12 it/s [?25h[?25l.90 it/s [?25h[?25l.41 it/s [?25h[?25l.37 it/s [?25h[?25l.20 it/s [?25h[?25l.26 it/s [?25h[?25l.64 it/s [?25h[?25l.80 it/s [?25h[?25l.78 it/s [?25h[?25l.55 it/s [?25h[?25l.87 it/s [?25h[?25l.85 it/s [?25h[?25l.80 it/s [?25h[?25l.39 it/s [?25h[?25l.28 it/s [?25h[?25l.22 it/s [?25h[?25l.59 it/s [?25h[?25l.92 it/s [?25h[?25l.69 it/s [?25h[?25l.32 it/s [?25h[?25l.12 it/s [?25h[?25l.89 it/s [?25h[?25l.76 it/s [?25h[?25l.70 it/s [?25h[?25l.01 it/s [?25h
+Iter:    95 [##############################]  128 /  128 | B.Loss: 3.98813e-01 | B.perf.: 283.57 it/s [?25h[?25l.58 it/s [?25h[?25l.08 it/s [?25h[?25l.94 it/s [?25h[?25l.17 it/s [?25h[?25l.85 it/s [?25h[?25l.10 it/s [?25h[?25l.44 it/s [?25h[?25l.91 it/s [?25h[?25l.14 it/s [?25h[?25l.03 it/s [?25h[?25l.18 it/s [?25h[?25l.94 it/s [?25h[?25l.98 it/s [?25h[?25l.11 it/s [?25h[?25l.38 it/s [?25h[?25l.75 it/s [?25h[?25l.47 it/s [?25h[?25l.85 it/s [?25h[?25l.92 it/s [?25h[?25l.92 it/s [?25h[?25l.24 it/s [?25h[?25l.24 it/s [?25h[?25l.38 it/s [?25h[?25l.49 it/s [?25h[?25l.24 it/s [?25h[?25l.26 it/s [?25h[?25l.15 it/s [?25h[?25l.74 it/s [?25h
+Iter:    96 [##############################]  128 /  128 | B.Loss: 3.33305e-01 | B.perf.: 280.15 it/s [?25h[?25l.94 it/s [?25h[?25l.58 it/s [?25h[?25l.92 it/s [?25h[?25l.47 it/s [?25h[?25l.87 it/s [?25h[?25l.45 it/s [?25h[?25l.24 it/s [?25h[?25l.50 it/s [?25h[?25l.02 it/s [?25h[?25l.31 it/s [?25h[?25l.78 it/s [?25h[?25l.26 it/s [?25h[?25l.03 it/s [?25h[?25l.30 it/s [?25h[?25l.30 it/s [?25h[?25l.45 it/s [?25h[?25l.15 it/s [?25h[?25l.90 it/s [?25h[?25l.84 it/s [?25h[?25l.75 it/s [?25h[?25l.99 it/s [?25h[?25l.56 it/s [?25h[?25l.82 it/s [?25h[?25l.99 it/s [?25h[?25l.62 it/s [?25h[?25l.30 it/s [?25h[?25l.40 it/s [?25h[?25l.70 it/s [?25h
+Iter:    97 [##############################]  128 /  128 | B.Loss: 2.83858e-01 | B.perf.: 288.79 it/s [?25h[?25l.61 it/s [?25h[?25l.16 it/s [?25h[?25l.61 it/s [?25h[?25l.24 it/s [?25h[?25l.53 it/s [?25h[?25l.38 it/s [?25h[?25l.91 it/s [?25h[?25l.79 it/s [?25h[?25l.92 it/s [?25h[?25l.40 it/s [?25h[?25l.97 it/s [?25h[?25l.16 it/s [?25h[?25l.07 it/s [?25h[?25l.21 it/s [?25h[?25l.27 it/s [?25h[?25l.79 it/s [?25h[?25l.63 it/s [?25h[?25l.02 it/s [?25h[?25l.69 it/s [?25h[?25l.91 it/s [?25h[?25l.34 it/s [?25h[?25l.16 it/s [?25h[?25l.13 it/s [?25h[?25l.39 it/s [?25h[?25l.76 it/s [?25h[?25l.43 it/s [?25h[?25l.30 it/s [?25h[?25l.42 it/s [?25h
+Iter:    98 [##############################]  128 /  128 | B.Loss: 3.62892e-01 | B.perf.: 279.05 it/s [?25h[?25l.30 it/s [?25h[?25l.13 it/s [?25h[?25l.61 it/s [?25h[?25l.68 it/s [?25h[?25l.84 it/s [?25h[?25l.85 it/s [?25h[?25l.51 it/s [?25h[?25l.21 it/s [?25h[?25l.18 it/s [?25h[?25l.40 it/s [?25h[?25l.59 it/s [?25h[?25l.38 it/s [?25h[?25l.36 it/s [?25h[?25l.28 it/s [?25h[?25l.87 it/s [?25h[?25l.85 it/s [?25h[?25l.57 it/s [?25h[?25l.53 it/s [?25h[?25l.80 it/s [?25h[?25l.07 it/s [?25h[?25l.26 it/s [?25h[?25l.56 it/s [?25h[?25l.26 it/s [?25h[?25l.68 it/s [?25h[?25l.61 it/s [?25h[?25l.27 it/s [?25h[?25l.80 it/s [?25h[?25l.46 it/s [?25h
+Iter:    99 [##############################]  128 /  128 | B.Loss: 3.22303e-01 | B.perf.: 298.61 it/s [?25h[?25l.66 it/s [?25h[?25l.07 it/s [?25h[?25l.30 it/s [?25h[?25l.86 it/s [?25h[?25l.12 it/s [?25h[?25l.18 it/s [?25h[?25l.51 it/s [?25h[?25l.25 it/s [?25h[?25l.99 it/s [?25h[?25l.71 it/s [?25h[?25l.12 it/s [?25h[?25l.51 it/s [?25h[?25l.11 it/s [?25h[?25l.08 it/s [?25h[?25l.32 it/s [?25h[?25l.18 it/s [?25h[?25l.07 it/s [?25h[?25l.38 it/s [?25h[?25l.50 it/s [?25h[?25l.84 it/s [?25h[?25l.55 it/s [?25h[?25l.25 it/s [?25h[?25l.70 it/s [?25h[?25l.13 it/s [?25h[?25l.03 it/s [?25h[?25l.14 it/s [?25h[?25l.22 it/s [?25h[?25l.30 it/s [?25h
+Iter:   100 [##############################]  128 /  128 | B.Loss: 3.12800e-01 | B.perf.: 270.95 it/s [?25h[?25l.94 it/s [?25h[?25l.22 it/s [?25h[?25l.97 it/s [?25h[?25l.65 it/s [?25h[?25l.30 it/s [?25h[?25l.21 it/s [?25h[?25l.85 it/s [?25h[?25l.76 it/s [?25h[?25l.70 it/s [?25h[?25l.71 it/s [?25h[?25l.46 it/s [?25h[?25l.12 it/s [?25h[?25l.33 it/s [?25h[?25l.41 it/s [?25h[?25l.89 it/s [?25h[?25l.69 it/s [?25h[?25l.07 it/s [?25h[?25l.76 it/s [?25h[?25l.20 it/s [?25h[?25l.79 it/s [?25h[?25l.33 it/s [?25h[?25l.28 it/s [?25h[?25l.00 it/s [?25h[?25l.26 it/s [?25h[?25l.83 it/s [?25h[?25l.49 it/s [?25h[?25l.95 it/s [?25h[?25l.26 it/s [?25h
+              Average Training perf.: 280.27 it/s | Mean Loss: 3.41803e-01 | Learning rate: 2.72185e-04 | Weight decay: 0.01000
+Fwd :   100 [##############################]   64 /   64 | B.Loss: 3.06056e-01 | B.perf.: 613.43 it/s [?25h[?25l.43 it/s [?25h[?25l.10 it/s [?25h[?25l.95 it/s [?25h[?25l.30 it/s [?25h[?25l.67 it/s [?25h[?25l.90 it/s [?25h[?25l.85 it/s [?25h[?25l.25 it/s [?25h[?25l.98 it/s [?25h[?25l.77 it/s [?25h[?25l.41 it/s [?25h[?25l.81 it/s [?25h[?25l.75 it/s [?25h[?25l.56 it/s [?25h[?25l.03 it/s [?25h[?25l.59 it/s [?25h[?25l.94 it/s [?25h[?25l.66 it/s [?25h[?25l.36 it/s [?25h[?25l.42 it/s [?25h[?25l.55 it/s [?25h[?25l.70 it/s [?25h[?25l.78 it/s [?25h[?25l.96 it/s [?25h[?25l.44 it/s [?25h[?25l.23 it/s [?25h[?25l.16 it/s [?25h[?25l.84 it/s [?25h
+              Average forward perf.: 611.91 it/s | Mean Loss: 2.55034e-01
+
+   *******  ConfMat  *******   Recall
+          923 |     101 |      90.14%
+           94 |     930 |      90.82%
+Prec.   90.76%    90.20%  Acc  90.48%
+Saving network for iteration: 100 (mode: 1)
+Saving optim state for iteration: 100 (mode: 1)
+
+Iter:   101 [##############################]  128 /  128 | B.Loss: 3.03765e-01 | B.perf.: 309.65 it/s [?25h[?25l.09 it/s [?25h[?25l.88 it/s [?25h[?25l.46 it/s [?25h[?25l.02 it/s [?25h[?25l.43 it/s [?25h[?25l.55 it/s [?25h[?25l.43 it/s [?25h[?25l.38 it/s [?25h[?25l.86 it/s [?25h[?25l.48 it/s [?25h[?25l.56 it/s [?25h[?25l.55 it/s [?25h[?25l.87 it/s [?25h[?25l.24 it/s [?25h[?25l.22 it/s [?25h[?25l.60 it/s [?25h[?25l.84 it/s [?25h[?25l.50 it/s [?25h[?25l.27 it/s [?25h[?25l.94 it/s [?25h[?25l.98 it/s [?25h[?25l.44 it/s [?25h[?25l.48 it/s [?25h[?25l.87 it/s [?25h[?25l.13 it/s [?25h[?25l.26 it/s [?25h[?25l.86 it/s [?25h[?25l.71 it/s [?25h
+Iter:   102 [###################-----------]   82 /  128 | B.Loss: 3.61503e-01 | B.perf.: 313.53 it/s [?25h[?25l.28 it/s [?25h[?25l.71 it/s [?25h[?25l.78 it/s [?25h[?25l.75 it/s [?25h[?25l.67 it/s [?25h[?25l.92 it/s [?25h[?25l.61 it/s [?25h[?25l.75 it/s [?25h[?25l.04 it/s [?25h[?25l.88 it/s [?25h[?25l.13 it/s [?25h[?25l.07 it/s [?25h[?25l.44 it/s [?25h[?25l.75 it/s [?25h[?25l.89 it/s [?25h[?25l.31 it/s [?25h[?25l.34 it/s [?25h
+ WARNING: program interrupted
+ENTER lib_exit
+
+#### eval log
+
+                  ..:^~!?JY5PB~                                                                                         
+          J5PGB#&&&&&#BGP55YY#&#!                                                                                       
+          &GGB##&&&@@@@@&#PJ?B#&B                                                                                       
+         .&#&@@@@@@@@@@@@@@@B##&G                                                                                       
+       ^G@@@@BJ^.   .~?P&@@@@@&&G                                                                                       
+     &&@@@B^   :!???^^..:7&@@@@&G      .~~~         :~~:         ~~~^        ~~~    ~~~^        ~~~         ^~~.        
+   .B@@@&^  !#@@@@@@@@&?^~J&@@@@B ^    !@@@.       :@@@@^       .@@@@G      .@@@:  .@@@@P      .@@@:       ~@@@@.       
+  .&@@@#  .J@@@#GP55PB&@&JJ5@@@@B ^G   !@@@.       &@@@@@.      .@@@@@&:     @@@:  .@@@@@&:    .@@@.      :@@@@@&       
+  &@@@@.  ?@@&Y?JJJJJJJP@5JY@@@@B ^@:  !@@@       #@@PY@@&      .@@@P@@@7    @@@:  .@@@P@@@7   .@@@.      &@@JG@@B      
+ :@@@@#  .@@@YJJJJJJJJJJGY?#@@@@B 5@!  !@@@      P@@#  G@@B     .@@@.:&@@G   @@@:  .@@@.:&@@P  .@@@.     #@@P  &@@5     
+ ~@Y&@#  .@@@P?JJJJJJJJJ?J#@@@@@G.@@~  !@@@     ?@@@:  .&@@5    .@@@.  G@@&. @@@:  .@@@.  G@@&. @@@.    P@@&.  :@@@7    
+ .@:#@@.  B@@@P5JJJJJJJ5B@@@@@@&#&@&   !@@@    ~@@@@@@@@@@@@7   .@@@.   ?@@@J@@@:  .@@@.   ?@@@J@@@.   ?@@@@@@@@@@@@^   
+  5^7@@#   G@@@&&&###&@@@@@@&&B@@@@^   !@@@   .@@@Y??????J@@@^  .@@@.    :&@@@@@:  .@@@.    :&@@@@@.  ~@@@J??????5@@@.  
+   : B@@&~  ^B@@@@@@@@@@&GPYJ#@@@@^    !@@@. .@@@J        7@@@: .@@@:      G@@@@:  .@@@.      G@@@@: :@@@!        5@@&. 
+      G@@@&?. .~5B&GJ7^:::7B@@@@&      .YJ?  ^YJ7          !JY~  ?JJ        !YJJ    JJJ        !YJJ  !YY!          ?JY^ 
+       7&@@@@&G?~^^~!Y5G&@@@@@&&G                                                                                       
+         ?@@@@@@@@@@@@@@@&#GY##&G                                                                                       
+          &PB&@@@@&&##BGP5J??B#&B                                                                                       
+          Y55PGB##&&&#BGPP55Y#&#!                                                                                       
+                 ...:^~!?JY5PB~                                                                                         
+
+#######################################################################
+     CIANNA V-1.1.0.4 /!\ EXPERIMENTAL build /!\ (11/2026), by D.Cornu
+#######################################################################
+
+ WARNING: Number of OpenMP threads likely not set by user.
+ OMP_MAX_THREADS set to 10  (half detected threads)
+ We recommend investigating manual configuration through environment variables
+
+ WARNING: Number of OpenBLAS threads likely not set by user.
+ OPENBLAS_MAX_THREADS set to 10  (half detected threads)
+ We recommend investigating manual configuration through environment variables
+
+Network (id: 0) initialized with : 
+Batch size: 32 
+Using BLAS compute method 
+Inference only: 1
+
+Setting test set
+
+L:0 - CREATING INPUT LAYER ...
+      Input branch: 0, Shape:64x64x1x3
+Fwd :   100 [##############################]   64 /   64 | B.Loss: 0.00000e+00 | B.perf.: 761.07 it/s [?25h[?25l.02 it/s [?25h[?25l.00 it/s [?25h[?25l.37 it/s [?25h[?25l.03 it/s [?25h[?25l.45 it/s [?25h[?25l.87 it/s [?25h[?25l.70 it/s [?25h[?25l.52 it/s [?25h[?25l.86 it/s [?25h[?25l.93 it/s [?25h[?25l.04 it/s [?25h[?25l.70 it/s [?25h[?25l.56 it/s [?25h[?25l.47 it/s [?25h[?25l.91 it/s [?25h[?25l.34 it/s [?25h[?25l.46 it/s [?25h[?25l.85 it/s [?25h[?25l.69 it/s [?25h[?25l.26 it/s [?25h[?25l.08 it/s [?25h[?25l.88 it/s [?25h[?25l.97 it/s [?25h[?25l.18 it/s [?25h[?25l.00 it/s [?25h[?25l.98 it/s [?25h[?25l.10 it/s [?25h[?25l.11 it/s [?25h
+              Average forward perf.: 739.99 it/s 
+Fwd :   100 [##############################]   64 /   64 | B.Loss: 0.00000e+00 | B.perf.: 817.03 it/s [?25h[?25l.65 it/s [?25h[?25l.67 it/s [?25h[?25l.79 it/s [?25h[?25l.64 it/s [?25h[?25l.90 it/s [?25h[?25l.68 it/s [?25h[?25l.81 it/s [?25h[?25l.89 it/s [?25h[?25l.08 it/s [?25h[?25l.51 it/s [?25h[?25l.93 it/s [?25h[?25l.89 it/s [?25h[?25l.37 it/s [?25h[?25l.60 it/s [?25h[?25l.21 it/s [?25h[?25l.45 it/s [?25h[?25l.00 it/s [?25h[?25l.97 it/s [?25h[?25l.47 it/s [?25h[?25l.23 it/s [?25h[?25l.40 it/s [?25h[?25l.97 it/s [?25h[?25l.34 it/s [?25h[?25l.16 it/s [?25h[?25l.80 it/s [?25h[?25l.09 it/s [?25h[?25l.76 it/s [?25h[?25l.85 it/s [?25h
+              Average forward perf.: 754.86 it/s 
+Fwd :   100 [##############################]   64 /   64 | B.Loss: 0.00000e+00 | B.perf.: 644.85 it/s [?25h[?25l.78 it/s [?25h[?25l.87 it/s [?25h[?25l.08 it/s [?25h[?25l.16 it/s [?25h[?25l.23 it/s [?25h[?25l.34 it/s [?25h[?25l.52 it/s [?25h[?25l.82 it/s [?25h[?25l.70 it/s [?25h[?25l.45 it/s [?25h[?25l.05 it/s [?25h[?25l.10 it/s [?25h[?25l.51 it/s [?25h[?25l.25 it/s [?25h[?25l.40 it/s [?25h[?25l.38 it/s [?25h[?25l.69 it/s [?25h[?25l.68 it/s [?25h[?25l.91 it/s [?25h[?25l.88 it/s [?25h[?25l.63 it/s [?25h[?25l.93 it/s [?25h[?25l.57 it/s [?25h[?25l.84 it/s [?25h[?25l.55 it/s [?25h[?25l.65 it/s [?25h[?25l.08 it/s [?25h[?25l.34 it/s [?25h
+              Average forward perf.: 732.93 it/s 
+Fwd :   100 [##############################]   64 /   64 | B.Loss: 0.00000e+00 | B.perf.: 798.53 it/s [?25h[?25l.24 it/s [?25h[?25l.19 it/s [?25h[?25l.28 it/s [?25h[?25l.10 it/s [?25h[?25l.82 it/s [?25h[?25l.20 it/s [?25h[?25l.93 it/s [?25h[?25l.93 it/s [?25h[?25l.02 it/s [?25h[?25l.84 it/s [?25h[?25l.02 it/s [?25h[?25l.22 it/s [?25h[?25l.90 it/s [?25h[?25l.54 it/s [?25h[?25l.53 it/s [?25h[?25l.91 it/s [?25h[?25l.55 it/s [?25h[?25l.35 it/s [?25h[?25l.06 it/s [?25h[?25l.92 it/s [?25h[?25l.36 it/s [?25h[?25l.59 it/s [?25h[?25l.19 it/s [?25h[?25l.50 it/s [?25h[?25l.13 it/s [?25h[?25l.40 it/s [?25h[?25l.09 it/s [?25h[?25l.32 it/s [?25h
+              Average forward perf.: 758.46 it/s 
+Fwd :   100 [##############################]   64 /   64 | B.Loss: 0.00000e+00 | B.perf.: 759.35 it/s [?25h[?25l.28 it/s [?25h[?25l.52 it/s [?25h[?25l.31 it/s [?25h[?25l.88 it/s [?25h[?25l.58 it/s [?25h[?25l.66 it/s [?25h[?25l.29 it/s [?25h[?25l.64 it/s [?25h[?25l.10 it/s [?25h[?25l.61 it/s [?25h[?25l.35 it/s [?25h[?25l.74 it/s [?25h[?25l.83 it/s [?25h[?25l.68 it/s [?25h[?25l.08 it/s [?25h[?25l.79 it/s [?25h[?25l.85 it/s [?25h[?25l.70 it/s [?25h[?25l.44 it/s [?25h[?25l.51 it/s [?25h[?25l.65 it/s [?25h[?25l.08 it/s [?25h[?25l.31 it/s [?25h[?25l.47 it/s [?25h[?25l.22 it/s [?25h[?25l.56 it/s [?25h[?25l.85 it/s [?25h[?25l.34 it/s [?25h
+              Average forward perf.: 801.73 it/s 
+Fwd :   100 [##############################]   64 /   64 | B.Loss: 0.00000e+00 | B.perf.: 774.49 it/s [?25h[?25l.93 it/s [?25h[?25l.31 it/s [?25h[?25l.28 it/s [?25h[?25l.89 it/s [?25h[?25l.59 it/s [?25h[?25l.14 it/s [?25h[?25l.61 it/s [?25h[?25l.50 it/s [?25h[?25l.27 it/s [?25h[?25l.20 it/s [?25h[?25l.61 it/s [?25h[?25l.75 it/s [?25h[?25l.71 it/s [?25h[?25l.98 it/s [?25h[?25l.57 it/s [?25h[?25l.04 it/s [?25h[?25l.77 it/s [?25h[?25l.35 it/s [?25h[?25l.69 it/s [?25h[?25l.99 it/s [?25h[?25l.67 it/s [?25h[?25l.14 it/s [?25h[?25l.90 it/s [?25h[?25l.00 it/s [?25h[?25l.93 it/s [?25h[?25l.52 it/s [?25h[?25l.69 it/s [?25h[?25l.99 it/s [?25h
+              Average forward perf.: 815.64 it/s 
+
+Total Net. nb weights: 0 
+Total Network RAM/VRAM usage : 3 MB
+(without datasets, and prop. to batch_size)
+
+     Layer  Type       Forward             Backprop             Cumulated
+       N     T      [µs]  /  [%]         [µs]  /  [%]         [µs]  /  [%]
+  -------------------------------------------------------------------
+       1     I        0.0 /  0.0          -nan / -nan          -nan / -nan
+       2     C      203.0 / 15.6          -nan / -nan          -nan / -nan
+       3     P       74.0 /  5.7          -nan / -nan          -nan / -nan
+       4     C      206.5 / 15.9          -nan / -nan          -nan / -nan
+       5     C      306.7 / 23.6          -nan / -nan          -nan / -nan
+       6     P       29.9 /  2.3          -nan / -nan          -nan / -nan
+       7     C       91.0 /  7.0          -nan / -nan          -nan / -nan
+       8     C      171.7 / 13.2          -nan / -nan          -nan / -nan
+       9     P       14.1 /  1.1          -nan / -nan          -nan / -nan
+      10     C       61.5 /  4.7          -nan / -nan          -nan / -nan
+      11     C      114.8 /  8.8          -nan / -nan          -nan / -nan
+      12     C       22.4 /  1.7          -nan / -nan          -nan / -nan
+      13     P        2.8 /  0.2          -nan / -nan          -nan / -nan
+  -------------------------------------------------------------------
+   Total           1298.5 µs              -nan µs              -nan µs       
+
+v3_gap | checkpoint 100 | batch 32
+Temps (s) : 2.713, 2.794, 2.700, 2.555, 2.511
+Médiane : 2.700 s | seuil < 5 s : OK
+Accuracy : 90.48 %
+
+
+
+### training 4 
+#### config
+import torch
+
+raw_image_size = 128
+image_size = 96
+eval_batch = 128
+precision = "FP16C_FP32A"
+checkpoint = "/content/config4_t4_96.dat"
+val_transform = A.Compose([A.Resize(image_size, image_size, interpolation=1)])
+
+def config4():
+  relu = cnn.relu(leaking=0.05, saturation=64.0)
+  cnn.input(spatial_shape=[image_size, image_size, 1], nb_features=3)
+  cnn.conv(f_size=(4,4), stride=(2,2), padding=(1,1), nb_filters=24, activation=relu)
+  for width in (48, 96):
+    cnn.pool(p_size=(2,2), p_type="MAX")
+    for _ in range(2):
+      cnn.conv(f_size=(3,3), padding=(1,1), nb_filters=width, activation=relu)
+  cnn.pool(p_size=(2,2), p_type="MAX")
+  cnn.conv(f_size=(3,3), padding=(1,1), nb_filters=128, activation=relu)
+  cnn.conv(f_size=(1,1), nb_filters=2, activation="LIN")
+  cnn.pool(p_size=(1,1), p_global=1, p_type="AVG", activation="SMAX")
+
+def check_budget():
+  cnn.init(b_size=eval_batch, inference_only=1, dynamic_load=1,
+           comp_meth="C_CUDA", mixed_precision=precision)
+  try:
+    config4()
+    data_prep(0, raw_image_size, image_size, test_mode=1)
+    x, y = create_validation_set(val_transform)
+    cnn.create_dataset("TEST", len(y), x, y)
+    cnn.forward(drop_mode="AVG_MODEL", no_error=1, saving=0, return_output=0)
+    torch.cuda.synchronize()
+    times = []
+    for _ in range(5):
+      start = time.perf_counter()
+      cnn.forward(drop_mode="AVG_MODEL", no_error=1, saving=0, return_output=0)
+      torch.cuda.synchronize()
+      times.append(1000 * (time.perf_counter() - start))
+    median = float(np.median(times))
+    print(f"Batch {eval_batch}, 2 048 images : {np.round(times, 1)} ms ; médiane {median:.1f} ms")
+    return median
+  finally:
+    free_data_helper()
+
+latency_ms = check_budget()
+
+if latency_ms >= 300:
+  raise RuntimeError("Budget dépassé. Ajuster eval_batch et relancer la cellule de chronométrage.")
+nb_images_per_iter = 2048
+load_iter = 0
+train_transform = A.Compose([
+  A.Resize(image_size, image_size, interpolation=1),
+  A.ColorJitter(brightness=(0.85,1.15), contrast=(0.85,1.15), saturation=(0.85,1.15), hue=0.05, p=0.8),
+  A.ToGray(p=0.02), A.HorizontalFlip(p=0.5),
+  A.Affine(scale=(0.9,1.1), rotate=(-10,10), interpolation=1, p=0.3),
+])
+
+#This funtion allow to launch data augmentation on a separate thread.
+#This way we can train on the GPU and generate new agumented examples in parallel.
+def data_augm():
+  input_data, targets = create_augmented_batch(train_transform)
+  cnn.delete_dataset("TRAIN_buf", silent=1)
+  cnn.create_dataset("TRAIN_buf", nb_images_per_iter, input_data[:,:], targets[:,:], silent=1)
+  return
+
+cnn.init(b_size=32, optimizer=cnn.rms_prop(momentum=0.9), wema=0, dynamic_load=1,
+  comp_meth='C_CUDA', mixed_precision=precision)
+config4()
+
+data_prep(nb_images_per_iter, raw_image_size, image_size)
+
+input_val, targets_val = create_validation_set(val_transform)
+cnn.create_dataset("VALID", 2048, input_val[:,:], targets_val[:,:])
+
+
+#Create fist augmentation before parallelization
+input_data, targets = create_augmented_batch(train_transform)
+cnn.create_dataset("TRAIN", nb_images_per_iter, input_data[:,:], targets[:,:])
+
+warmup = 10
+cycle_length = 500
+nb_cycles = 1
+#Cycle length and/or the number of cycle should be increased with the complexity of the network and task
+
+l_r_max = 3e-4
+l_r_min = 3e-6
+
+#In case the creation of new augmented data is too long compared to training, you can
+#increase the number of training iteration over a single augmentation
+nb_iter_per_augm = 1
+if(nb_iter_per_augm > 1):
+  shuffle_frequency = 1
+else:
+  shuffle_frequency = 0
+
+
+for i in range(load_iter, nb_cycles*cycle_length):
+
+  if((i+1) % nb_iter_per_augm == 0):
+    t = Thread(target=data_augm)
+    t.start()
+
+  if(i < warmup):
+    l_r = l_r_min + (l_r_max - l_r_min) * min(i/warmup,1.0)
+  else: # Cyclical cosin learning rate decay with warm restart
+    cycle_id = i//cycle_length
+    in_cycle_progress = (i%cycle_length)/cycle_length
+    l_r = l_r_min + 0.5*(l_r_max*0.8**cycle_id - l_r_min)*(1 + np.cos(np.pi*in_cycle_progress))
+
+  cnn.train(nb_iter=1, learning_rate=l_r, weight_decay=0.01, decoupled_wdecay=1,
+    confmat=1, control_interv=50, save_every=100, save_optim_every=100, save_bin=1, TC_scale_factor=128.0, shuffle_every=shuffle_frequency)
+
+  if(i == 0):
+    cnn.perf_eval()
+
+  if((i+1) % nb_iter_per_augm == 0):
+    t.join()
+    cnn.swap_data_buffers("TRAIN")
+
+cnn.save(checkpoint, bin=1)
+free_data_helper()
+#### training log
 #### eval log
