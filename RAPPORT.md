@@ -116,7 +116,8 @@ J’ai gardé le découpage ASIRRA du TP et les mêmes 2 048 images pour compare
 | 4 · T4 | Images 96 × 96, première convolution de stride 2, entraînement et inférence en précision mixte | **89,70 % à 150** en validation, **50,00 % à 500** | **154,5 ms** au checkpoint 500 |
 | 5 · T4 | Même architecture, entraînement FP32, inférence en précision mixte et sauvegarde du meilleur checkpoint | **94,29 %** au meilleur checkpoint (500), après **15,09 min** | **136,1 ms** |
 | 6 · T4 | Images 128 × 128 au lieu de 96 × 96, architecture et entraînement de la config 5 | **95,56 %** au checkpoint 450 (500 itérations en **17,90 min**) | **244,9 ms** |
-| 7 · T4 | Comme la 6, mais rotation et changement d’échelle appliqués à 60 % des images au lieu de 30 % | À mesurer | À mesurer |
+| 7 · T4 | Comme la 6, mais rotation et changement d’échelle appliqués à 60 % des images au lieu de 30 % | Log de la 6 recopié, résultat à confirmer | — |
+| 8 · T4 | Comme la 6 (affine à 30 %), avec un taux d’apprentissage maximal réduit de 0,0003 à 0,00015 | À mesurer | À mesurer |
 
 Sur CPU, la config 1 finit par plafonner autour de 84 % alors que sa perte d’entraînement baisse encore. Avec la config 2, la perte de validation passe de 0,356 à 0,224 et l’accuracy continue de monter. La config 3 était encore en progression à son arrêt. À quantité de données vue égale (409 600 images), elle atteint 90,48 % contre 87,21 % pour la config 2 et 89,26 % pour la config 4.
 
