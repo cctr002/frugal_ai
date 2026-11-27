@@ -19,7 +19,7 @@ mkdir -p openmp_results
 out=$(mktemp openmp_results/q34_9600_XXXXXX.csv)
 timings="${out%.csv}_temps.txt"
 echo "threads,mean_s,gflops,watts,gflops_per_watt,gflops_per_watt_above_idle" > "$out"
-echo "Résultats : $out et $timings. Temps maximal : 45 min."
+echo "Résultats : $out et $timings. Prévoir environ 4 à 8 min sur le poste de la salle (budget maximal : 45 min)."
 export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 OMP_DYNAMIC=FALSE
 if ! limited 240 python3 - <<'PY' | tee -a "$timings"
 from statistics import mean
@@ -60,7 +60,8 @@ int main(void) {
         matmul_v6(a, b, c, n, n, n);
         ++repeats;
         elapsed = omp_get_wtime() - start;
-    } while (elapsed < 45.0 || repeats < 3);
+    } while (repeats < 3 && elapsed < 30.0);
+    fprintf(stderr, "%d passage(s) chronométré(s) en %.1f s\n", repeats, elapsed);
     printf("%.6f\n", elapsed / repeats);
     free(a); free(b); free(c); free(reference);
     return 0;
