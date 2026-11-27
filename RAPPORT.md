@@ -152,6 +152,8 @@ Temps moyens à **N = 1 920**, en secondes. La dernière colonne utilise `-O3 -m
 
 *Débit des quatre versions CUDA sur T4.*
 
+**Conclusion sur la multiplication matricielle.** Sur CPU, à 1 920, le découpage en blocs de cache ramène le temps de 228 à 136 ms entre v5 et v6. À 9 600, le meilleur compromis mesuré est de 20 threads, avec 4,70 s et 2,40 GFLOP/J à la prise. Sur T4, à 4 096, le passage du kernel naïf au kernel par tuiles réduit le temps de 3,05 s à 64,8 ms. Dans les deux cas, réutiliser les données améliore le débit.
+
 ## Partie 2 — Reconnaître les chats et les chiens
 
 Tous les modèles utilisent le découpage ASIRRA du TP. L’évaluation porte sur les mêmes 2 048 images. L’objectif est d’obtenir la meilleure accuracy **en moins de 300 ms sur le T4**. Les essais CPU avaient un budget local de 5 s.
@@ -164,11 +166,11 @@ Tous les modèles utilisent le découpage ASIRRA du TP. L’évaluation porte su
 | 4 · T4 | Images 96 × 96, première convolution de stride 2, entraînement et inférence en précision mixte | **89,70 % à 150** en validation, **50,00 % à 500** | **154,5 ms** au checkpoint 500 |
 | 5 · T4 | Même architecture, entraînement FP32, inférence en précision mixte et sauvegarde du meilleur checkpoint | **94,29 %** au meilleur checkpoint (500), après **15,09 min** | **136,1 ms** |
 | 6 · T4 | Images 128 × 128 au lieu de 96 × 96, architecture et entraînement de la config 5 | **95,56 %** au checkpoint 450 (500 itérations en **17,90 min**) | **244,9 ms** |
-| 7 · T4 | Comme la 6, mais rotation et changement d’échelle appliqués à 60 % des images au lieu de 30 % | Log de la 6 recopié, résultat à confirmer | — |
-| 8 · T4 | Comme la 6 (affine à 30 %), avec un taux d’apprentissage maximal réduit de 0,0003 à 0,00015 | À mesurer | À mesurer |
 
-Sur CPU, la config 1 finit par plafonner autour de 84 % alors que sa perte d’entraînement baisse encore. La config 1 continue donc à mieux ajuster les images d’entraînement sans gain comparable en validation. Avec la config 2, la perte de validation passe de 0,356 à 0,224 et l’accuracy continue de monter. La config 3 était encore en progression à son arrêt. À quantité de données vue égale (409 600 images), elle atteint 90,48 % contre 87,21 % pour la config 2 et 89,26 % pour la config 4.
+Sur CPU, la config 1 plafonne autour de 84 % alors que sa perte d’entraînement continue de baisser, signe d’un léger surapprentissage. La config 2 atteint 92,92 % en 3,63 s. La config 3 était encore en progression à son arrêt. À quantité de données vue égale (409 600 images), elle atteint 90,48 % contre 87,21 % pour la config 2.
 
-Sur T4, la config 4 tient le budget de temps. À partir de l’itération 250, les pertes d’entraînement et de validation augmentent ensemble. À 400, le réseau prédit « chat » pour les 2 048 images. Cela indique une instabilité d’entraînement. Avec la config 5, la validation remonte de 89,40 % à l’itération 200 à 94,29 % à 500. À 128 × 128, la config 6 gagne encore 1,27 point et reste sous 300 ms. Elle progresse de 94,68 % à 250 itérations à 95,56 % à 450, puis finit à 95,51 %. Passer de 96 à 128 pixels améliore ici la reconnaissance, au prix de 108,8 ms supplémentaires pour traiter les 2 048 images.
+Sur T4, les pertes d’entraînement et de validation de la config 4 remontent ensemble à partir de l’itération 250. À 400, le réseau prédit « chat » pour toutes les images. Avec l’entraînement en FP32 de la config 5, la validation atteint 94,29 % à l’itération 500. L’inférence en précision mixte tient en 136,1 ms.
 
-**Modèle retenu à ce stade.** Le checkpoint 450 de la config 6 classe correctement 95,56 % des images en 244,9 ms, soit 55,1 ms sous le budget. Les essais 7 et 8 restent à départager.
+**Pistes pour les configs 7 et 8.** Deux essais permettraient d’isoler l’effet de chaque réglage en repartant de la config 6. Le premier appliquerait les rotations et changements d’échelle à 60 % des images d’entraînement au lieu de 30 %, pour tester la robustesse aux variations de cadrage. Le second garderait la probabilité de 30 % et diviserait le taux d’apprentissage maximal par deux, pour tester si des mises à jour plus petites améliorent la précision en 500 itérations.
+
+**Conclusion sur le CNN.** Le modèle retenu est la **config 6 au checkpoint 450**. Passer de 96 × 96 à 128 × 128 donne un gain de **1,27 point** par rapport à la config 5 pour **108,8 ms** de plus. Ce checkpoint atteint **95,56 % de bonnes prédictions sur 2 048 images en 244,9 ms**, avec **55,1 ms de marge** sur le T4.
