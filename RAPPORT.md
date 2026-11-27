@@ -1,5 +1,7 @@
 # TP Frugal AI
 
+Trinh Cédric
+
 ## Partie 1 — Multiplier deux matrices
 
 ### Q1–2 · Machine et puissance au repos
