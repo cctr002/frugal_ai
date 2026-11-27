@@ -97,14 +97,15 @@ J’ai gardé le découpage ASIRRA du TP et les mêmes 2 048 images pour compare
 | 2 · CPU | Cinq convolutions, augmentations plus fortes et dropout réduit | **92,92 %** à 500 | 3,63 s |
 | 3 · CPU | Plus de convolutions sur de petites cartes, moyenne globale et aucune couche dense | **90,48 % au checkpoint 100**, entraînement arrêté | 2,70 s |
 | 4 · T4 | Images 96 × 96, première convolution de stride 2, entraînement et inférence en précision mixte | **89,70 % à 150** en validation, **50,00 % à 500** | **154,5 ms** au checkpoint 500 |
-| 5 · T4 | Même architecture, entraînement FP32, inférence en précision mixte et sauvegarde du meilleur checkpoint | Mesure à intégrer | Mesure à intégrer |
+| 5 · T4 | Même architecture, entraînement FP32, inférence en précision mixte et sauvegarde du meilleur checkpoint | **94,29 %** au meilleur checkpoint (500), après **15,09 min** | **136,1 ms** |
+| 6 · T4 | Images 128 × 128 au lieu de 96 × 96, architecture et entraînement de la config 5 | À mesurer | À mesurer |
 
 Sur CPU, la config 1 finit par plafonner autour de 84 % alors que sa perte d’entraînement baisse encore. Avec la config 2, la perte de validation passe de 0,356 à 0,224 et l’accuracy continue de monter. La config 3 était encore en progression à son arrêt. À quantité de données vue égale (409 600 images), elle atteint 90,48 % contre 87,21 % pour la config 2 et 89,26 % pour la config 4.
 
-Sur T4, la config 4 tient le budget de temps. À partir de l’itération 250, les pertes d’entraînement et de validation augmentent ensemble. À 400, le réseau prédit « chat » pour les 2 048 images. Cela indique une instabilité d’entraînement. La config 5 teste l’effet du FP32 et garde les poids du meilleur passage. Pour le choix final, il faut associer l’accuracy et la latence **du même checkpoint sur le T4**. [Logs des essais](notes.md)
+Sur T4, la config 4 tient le budget de temps. À partir de l’itération 250, les pertes d’entraînement et de validation augmentent ensemble. À 400, le réseau prédit « chat » pour les 2 048 images. Cela indique une instabilité d’entraînement. Avec la config 5, la validation remonte de 89,40 % à l’itération 200 à 94,29 % à 500. Ce checkpoint est le meilleur mesuré sous 300 ms. La config 6 utilise la marge de temps pour tester des images plus détaillées. [Logs des essais](notes.md)
 
 ## Mesures restant à intégrer
 
 - **Q9 et Q34, sur le poste de la salle.** Depuis la racine du dépôt, lancer `bash mesures_rapport.sh`. Prévoir environ 4 à 8 min sur le poste de la salle. Après la chauffe, chaque point s’arrête au bout de trois mesures ou dès qu’une mesure terminée porte le cumul à 30 s. La limite de sécurité pour la campagne est de 45 min. Chaque point v6 est limité à 3 min. Le script réutilise les huit puissances stabilisées du tableau Q34 et les 20 W au repos. Il tourne sans intervention. Le script donne le meilleur débit par watt à la prise et enregistre aussi le débit rapporté au surcroît de puissance par rapport au repos.
 - **Q35–40.** Placer le fichier téléchargé depuis le notebook T4 dans `gpu_results/gpu.csv`, puis lancer `python gpu_bench.py report --cpu-watts 180 --gpu-watts 70`. Cette commande exploite le CSV CPU existant et génère les deux graphiques.
-- **CNN.** Reporter les résultats du checkpoint retenu et joindre ses poids `.dat` avec le notebook. Le temps mural des configurations 1 à 4 manque dans les logs. La config 5 le consigne dans `training.csv`.
+- **CNN.** Reporter les résultats du checkpoint retenu et joindre ses poids `.dat` avec le notebook. Le temps mural des configurations 1 à 4 manque dans les logs. Les configs 5 et 6 le consignent dans `training.csv`.
