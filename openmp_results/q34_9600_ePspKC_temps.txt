@@ -1,0 +1,9 @@
+Q9 Numba à 1920 : 8.5078 s (3 passages hors compilation)
+1 threads : 19.766203 s
+2 threads : 10.130238 s
+4 threads : 6.772910 s
+8 threads : 5.048940 s
+12 threads : 4.985738 s
+16 threads : 4.989519 s
+20 threads : 4.702705 s
+24 threads : 5.075069 s
