@@ -6,8 +6,9 @@ from itertools import combinations, product
 from pathlib import Path
 from statistics import mean, stdev
 from tempfile import TemporaryDirectory
-import time 
+
 ROOT = Path(__file__).resolve().parent
+FAST_FLAGS = "-O3 -march=native -funroll-loops -ffast-math"
 ENV = {**os.environ, "OMP_NUM_THREADS": "1", "OPENBLAS_NUM_THREADS": "1"}
 
 
@@ -35,7 +36,7 @@ def measure(executable, size, version, repeats=3, env=None):
 
 
 def search_flags(question, size=1920):
-    """Print five-run measurements for every compilation combination requested."""
+    """Print three-run measurements for every compilation combination requested."""
     versions = {
         10: ["matmul_v1"],
         12: ["matmul_v2"],
@@ -51,10 +52,9 @@ def search_flags(question, size=1920):
         flags = [" ".join(("-O3", *combo))
                  for n in range(len(extra)+1) for combo in combinations(extra, n)]
     if question in (19, 22):
-        extra = ["-march=native", "-funroll-loops", "-ffast-math"]
-        flags.append("-O3 -march=native -funroll-loops -ffast-math")
+        flags.append(FAST_FLAGS)
     if question == 25:
-        flags = ["-O3 -march=native -funroll-loops -ffast-math"]
+        flags = [FAST_FLAGS]
     with TemporaryDirectory() as directory:
         executable = Path(directory) / "matmul"
         for options in flags:
@@ -67,7 +67,7 @@ def search_flags(question, size=1920):
 
 
 def test_kernel_sizes(sizes=(240, 1920), kernels=((8, 6), (16, 6), (16, 8)),
-                      flags="-O3 -march=native -funroll-loops -ffast-math"):
+                      flags=FAST_FLAGS):
     """Q24: compare kernel dimensions at one small and one large matrix size."""
     with TemporaryDirectory() as directory:
         executable = Path(directory) / "matmul"
@@ -85,7 +85,7 @@ def test_kernel_sizes(sizes=(240, 1920), kernels=((8, 6), (16, 6), (16, 8)),
 
 def search_blocks(size=1920, rows=(32, 64, 128), columns=(60, 120, 240),
                   depths=(120, 240, 480), height=16, width=6,
-                  flags="-O3 -march=native -funroll-loops -ffast-math"):
+                  flags=FAST_FLAGS):
     """Q26: explore valid bK > bN > bM combinations; return the fastest blocks."""
     if height <= 0 or height % 8 or width <= 0 or size % height or size % width:
         raise ValueError("Matrix size must match the kernel; height must be a multiple of 8.")
@@ -124,7 +124,7 @@ def plot_compare_FLOPS(m_sizes, versions, name="matmul", repeats=3):
             speeds = []
             for size in m_sizes:
                 avg, sd, _ = measure(executable, size, version, repeats)
-                speed = size**3 / (avg*1e9) 
+                speed = size**3 / (avg*1e9)
                 speeds.append(speed)
                 writer.writerow([version, size, flags, avg, sd, speed])
                 print(f"{version}, N={size}: {avg:.6f} +/- {sd:.6f} s", flush=True)
@@ -138,34 +138,10 @@ def plot_compare_FLOPS(m_sizes, versions, name="matmul", repeats=3):
     plt.show()
 
 if __name__ == "__main__":
-    # Q24: test_kernel_sizes()
-    # Q25 -> Q26 -> Q27, in order.
-    # search_flags(25)
-    best_flags = "-O3 -march=native -funroll-loops -ffast-math"
     height, width = 16, 6
-    bm, bn, bk = search_blocks(height=height, width=width, flags=best_flags)
-    v6_flags = (f"{best_flags} -Dker_h={height} -Dker_w={width}"
+    bm, bn, bk = search_blocks(height=height, width=width, flags=FAST_FLAGS)
+    v6_flags = (f"{FAST_FLAGS} -Dker_h={height} -Dker_w={width}"
                 f" -DBLOCK_M={bm} -DBLOCK_N={bn} -DBLOCK_K={bk}")
     plot_compare_FLOPS(range(48, 3841, 48),
-        versions=[("matmul_v4", best_flags), ("matmul_v5", best_flags),
+        versions=[("matmul_v4", FAST_FLAGS), ("matmul_v5", FAST_FLAGS),
                   ("matmul_v6", v6_flags), ("OpenBLAS", "-O2")], name="q27")
-    # search_flags(22)
-    # Q23: replace these flags with the best configuration measured in Q22.
-    # best_flags = "-O3 -march=native -funroll-loops -ffast-math"
-    # plot_compare_FLOPS(range(48, 3841, 48),
-    #     versions=[("matmul_v4", best_flags), ("matmul_v5", best_flags),
-    #               ("OpenBLAS", "-O2")], name="q23")
-    # search_flags(19)
-    # v1 = ("matmul_v1", "-O2")
-    # v2 = ("matmul_v2", "-O1")
-    # v3_q15 = ("matmul_v3", "-O2")
-    # v3_q17 = ("matmul_v3", "-O3 -march=native -funroll-loops -ffast-math")
-    # v4_q19 = ("matmul_v4", "-O3 -march=native -funroll-loops -ffast-math")
-    # blas = ("OpenBLAS", "-O2")
-    # plot_compare_FLOPS(range(128, 1921, 128),
-                    #    versions=[v1, v2], name="q11_13")
-    # plot_compare_FLOPS(range(128, 4097, 128),
-    #                    versions=[v4_q19, blas], name="q19")
-
-
-

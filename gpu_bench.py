@@ -30,7 +30,7 @@ def sizes_for(limit, step):
 
 def record(writer, mode, size, avg, sd, device, repeats, threads=""):
     rate = 2 * size**3 / (avg * 1e9)
-    writer.writerow(dict(zip(FIELDS, (mode, size, avg, sd, rate, threads, device, repeats))))
+    writer.writerow((mode, size, avg, sd, rate, threads, device, repeats))
     print(f"{LABELS[mode]}, N={size}: {avg:.6g} ± {sd:.3g} s | {rate:.2f} GFLOP/s", flush=True)
 
 
@@ -61,8 +61,8 @@ def bench_gpu(args, sizes):
         for mode in GPU_MODES:
             times(mode, 64, 1)
         with (args.output / "gpu.csv").open("w", newline="", encoding="utf-8") as file:
-            writer = csv.DictWriter(file, fieldnames=FIELDS)
-            writer.writeheader()
+            writer = csv.writer(file)
+            writer.writerow(FIELDS)
             for size in sizes:
                 for mode in GPU_MODES:
                     avg, sd = times(mode, size, args.repeats)
@@ -106,8 +106,8 @@ def bench_cpu(args, sizes):
             multi = one if threads == 1 else times(reference, threads)
         print(f"CPU: {model} | OpenBLAS curve: {threads} threads", flush=True)
         with (args.output / "cpu.csv").open("w", newline="", encoding="utf-8") as file:
-            writer = csv.DictWriter(file, fieldnames=FIELDS)
-            writer.writeheader()
+            writer = csv.writer(file)
+            writer.writerow(FIELDS)
             record(writer, "cpu_one", reference, *one, model, args.repeats, 1)
             for size in sizes:
                 avg, sd = multi if size == reference else times(size, threads)

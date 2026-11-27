@@ -8,20 +8,18 @@ import subprocess
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from C_python_wrapper import ENV, compile_c, measure
-
-FLAGS = "-O3 -march=native -funroll-loops -ffast-math"
+from C_python_wrapper import ENV, FAST_FLAGS, compile_c, measure
 
 
 def cpu_counts():
     allowed = os.sched_getaffinity(0)
     topology = subprocess.check_output(["lscpu", "-p=CPU,CORE,SOCKET"], text=True)
+    rows = (line for line in topology.splitlines() if line and not line.startswith("#"))
     cores = set()
-    for line in topology.splitlines():
-        if line and not line.startswith("#"):
-            cpu, core, socket = map(int, line.split(","))
-            if cpu in allowed:
-                cores.add((core, socket))
+    for row in rows:
+        cpu, core, socket = map(int, row.split(","))
+        if cpu in allowed:
+            cores.add((core, socket))
     return len(cores), len(allowed)
 
 
@@ -35,7 +33,7 @@ def run(size, blocks, counts, physical, repeats, output):
         raise ValueError("Thread counts and repeats must be positive.")
     counts = sorted(set(counts) | {1, physical})
     output.mkdir(parents=True, exist_ok=True)
-    flags = f"{FLAGS} -DBLOCK_M={bm} -DBLOCK_N={bn} -DBLOCK_K={bk}"
+    flags = f"{FAST_FLAGS} -DBLOCK_M={bm} -DBLOCK_N={bn} -DBLOCK_K={bk}"
 
     def timed(executable, threads=1, schedule="static", version="matmul_v6", blas_threads=1):
         env = dict(ENV, OMP_NUM_THREADS=str(threads), OMP_SCHEDULE=schedule,
@@ -58,8 +56,7 @@ def run(size, blocks, counts, physical, repeats, output):
     with TemporaryDirectory() as directory:
         binaries = {axis: Path(directory) / f"omp_{axis}" for axis in ("M", "N")}
         for axis, executable in binaries.items():
-            axis_flag = int(axis == "N")
-            compile_c(executable, f"{flags} -DV6_OMP_AXIS_N={axis_flag} -fopenmp")
+            compile_c(executable, f"{flags} -DV6_OMP_AXIS_N={int(axis == 'N')} -fopenmp")
 
         with (output / "q28_q29.csv").open("w", newline="") as file:
             writer = csv.writer(file)
@@ -85,8 +82,7 @@ def run(size, blocks, counts, physical, repeats, output):
                   flush=True)
 
         sequential = Path(directory) / "sequential"
-        axis_flag = int(axis == "N")
-        compile_c(sequential, f"{flags} -DV6_OMP_AXIS_N={axis_flag}")
+        compile_c(sequential, f"{flags} -DV6_OMP_AXIS_N={int(axis == 'N')}")
         seq, seq_sd = timed(sequential)
         one, one_sd = timings[0]
         print(f"Q31 | without OpenMP {seq:.6f} ± {seq_sd:.6f} s | "
