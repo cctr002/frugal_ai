@@ -37,7 +37,7 @@ Temps moyens à **N = 1 920**, en secondes. La dernière colonne utilise `-O3 -m
 | v3 · transposition de A | 12,093 | 2,958 | 2,887 | 2,936 | **0,477** |
 | v4 · vecteurs de 8 floats | 11,893 | 1,754 | 1,677 | 1,723 | **0,473** |
 
-**Q9–11.** Sans option, v1 atteint seulement **0,55 %** du débit d’OpenBLAS dans la série répétée. Passer à `-O2` divise le temps par 3,4. `-O3` apporte peu ici. Une boucle C compilée sans optimisation peut donc être plus lente qu’une boucle Python compilée par Numba. La figure Numba donne un ordre de grandeur à 1 920 ; le temps exact comparable est à relever avec la commande en fin de rapport. [Courbes v1 et v2](q11_13.png)
+**Q9–11.** Sans option, v1 atteint seulement **0,55 %** du débit d’OpenBLAS dans la série répétée. Passer à `-O2` divise le temps par 3,4. `-O3` apporte peu ici. À la même taille, Numba prend **8,508 s** en moyenne sur trois passages hors compilation. Il devance le C sans option (18,386 s), mais le C avec `-O2` passe devant (5,394 s). [Courbes v1 et v2](q11_13.png)
 
 **Q12–13.** v2 accumule chaque produit dans une variable locale et écrit C une seule fois en fin de boucle. Le gain est surtout visible sans optimisation. Aux meilleurs réglages, on passe de 5,39 à 4,79 s. L’accès à une colonne avec un grand pas mémoire reste coûteux.
 
@@ -76,16 +76,33 @@ Temps moyens à **N = 1 920**, en secondes. La dernière colonne utilise `-O3 -m
 | Threads | 1 | 2 | 4 | 8 | 12 | 16 | 20 | 24 |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
 | Puissance (W) | 63 | 86 | 136 | 171 | 170 | 162 | 157 | 166 |
+| Temps v6 (s) | 19,77 | 10,13 | 6,77 | 5,05 | 4,99 | 4,99 | **4,70** | 5,08 |
+| GFLOP/J à la prise | 1,42 | 2,03 | 1,92 | 2,05 | 2,09 | 2,19 | **2,40** | 2,10 |
 
-La puissance atteint son maximum mesuré à 8 threads. Le meilleur débit par watt peut se trouver ailleurs. Il manque les **temps de v6 à 9 600** et la confirmation que les puissances ont été lues pendant v6. Le binaire utilisé dans les notes exécute aussi OpenBLAS. Le test en fin de rapport chronomètre v6 seule à 9 600. Le calcul d’efficacité suppose que les watts stabilisés déjà relevés correspondent à cette phase.
+**20 threads donnent à la fois le meilleur temps et le meilleur rendement.** À 8 threads le poste consomme davantage (171 W contre 157 W) pour un calcul plus lent. Si je soustrais les 20 W au repos, le maximum reste à 20 threads, avec **2,75 GFLOP/J**. Ce calcul associe deux passages à 9 600 sur le même poste et suppose que les watts stabilisés ont été relevés pendant v6. [Temps et puissances](openmp_results/q34_9600_ePspKC.csv)
 
 ### Q35–40 · CPU contre T4
 
-**Q35–36.** À **4 096**, OpenBLAS prend **0,971 s à 1 thread** et **0,160 s à 8 threads**, soit un gain de **6,06×**. La courbe multicœur atteint **857 GFLOP/s à 4 096** et **684 à 16 384**. Le CSV CPU couvre déjà toute la grille. [Mesures CPU](gpu_results/cpu.csv)
+**Q35.** À N = 4 096, voici le temps moyen de trois multiplications. Sur le T4, les matrices sont déjà en mémoire GPU et le chronométrage exclut les transferts.
 
-**Q37.** En prenant la puissance turbo maximale publiée du i7-12700, **180 W**, le meilleur rapport estimé est **857/180 = 4,76 GFLOP/J**, à 4 096. C’est une estimation à puissance constante. Pour le T4, le sujet retient 70 W. [Fiche Intel](https://www.intel.com/content/www/us/en/products/sku/134591/intel-core-i712700-processor-25m-cache-up-to-4-90-ghz/specifications.html)
+| Version | Temps | GFLOP/s |
+|---|---:|---:|
+| OpenBLAS CPU, 1 thread | 971,4 ms | 141 |
+| OpenBLAS CPU, 8 threads | 160,4 ms | 857 |
+| cuBLAS T4, FP32 | **33,3 ms** | **4 128** |
+| CUDA naïf | 3 052,1 ms | 45 |
+| CUDA par tuiles | 64,8 ms | 2 121 |
+| GemmEx, entrées FP16 et accumulation FP32 | **2,77 ms** | **49 574** |
 
-**Q38–40.** Le kernel naïf calcule une case de C par thread. Le kernel par tuiles réutilise A et B en mémoire partagée. GemmEx utilise les Tensor Cores avec des entrées FP16 et une accumulation FP32. Pour chiffrer les gains, il manque le CSV T4 dans le dépôt. Le script calcule le ratio de chaque variante à cuBLAS FP32 **à taille égale**, sa meilleure taille, l’accélération à 4 096 et les courbes jusqu’à 16 384. Le rapport des pics théoriques FP16/FP32 du T4 est d’environ **8×** ; l’accélération mesurée dépend de la taille.
+**Q36.** À 4 096, cuBLAS FP32 est **29,2×** plus rapide qu’OpenBLAS à un thread et **4,8×** plus rapide qu’à huit threads. Le T4 est déjà devant à la première taille testée (1 024). À 16 384, il atteint **4 080 GFLOP/s**, contre **684** sur CPU. [Courbe CPU et T4](gpu_results/q36_cpu_gpu.png)
+
+**Q37.** Avec la puissance turbo maximale publiée du i7-12700 (**180 W**), le CPU atteint au mieux **857/180 = 4,76 GFLOP/J**, à 4 096. Avec les **70 W** du sujet, le T4 en FP32 atteint **7 377/70 = 105,4 GFLOP/J**, à 2 048. Le rapport estimé vaut **22×**. Ces chiffres utilisent une puissance constante sur toute la courbe. [Fiche Intel](https://www.intel.com/content/www/us/en/products/sku/134591/intel-core-i712700-processor-25m-cache-up-to-4-90-ghz/specifications.html)
+
+**Q38.** Chaque thread du kernel naïf calcule une seule case de C et relit deux valeurs à chaque tour sur K. Son meilleur résultat relatif est **1,09 % de cuBLAS**, à 4 096. À cette taille, même OpenBLAS sur un seul thread le devance.
+
+**Q39.** Le kernel par tuiles partage les données d’un bloc et conserve plusieurs sommes en registres. À 4 096, il est **47×** plus rapide que le naïf et atteint **51 % de cuBLAS**. Son meilleur rapport est **64 % à 1 024**. Son débit maximal arrive à 2 048, puis retombe de 3 192 à 1 636 GFLOP/s entre 2 048 et 16 384.
+
+**Q40.** GemmEx atteint son meilleur débit à **5 120** (49,9 TFLOP/s), contre **2 048** pour cuBLAS FP32 (7,38 TFLOP/s). À 5 120, GemmEx est **13,6×** plus rapide que cuBLAS FP32. Ce chiffre dépasse le rapport théorique des pics (environ 8×) parce qu’à cette taille le FP32 mesuré est déjà loin de son pic. Si on compare les deux meilleurs débits mesurés, le rapport vaut **6,8×**. [Courbes des quatre kernels](gpu_results/q38_q40_cuda.png) · [Mesures du T4](gpu_results/gpu.csv)
 
 ## Partie 2 — Reconnaître les chats et les chiens
 
@@ -98,14 +115,11 @@ J’ai gardé le découpage ASIRRA du TP et les mêmes 2 048 images pour compare
 | 3 · CPU | Plus de convolutions sur de petites cartes, moyenne globale et aucune couche dense | **90,48 % au checkpoint 100**, entraînement arrêté | 2,70 s |
 | 4 · T4 | Images 96 × 96, première convolution de stride 2, entraînement et inférence en précision mixte | **89,70 % à 150** en validation, **50,00 % à 500** | **154,5 ms** au checkpoint 500 |
 | 5 · T4 | Même architecture, entraînement FP32, inférence en précision mixte et sauvegarde du meilleur checkpoint | **94,29 %** au meilleur checkpoint (500), après **15,09 min** | **136,1 ms** |
-| 6 · T4 | Images 128 × 128 au lieu de 96 × 96, architecture et entraînement de la config 5 | À mesurer | À mesurer |
+| 6 · T4 | Images 128 × 128 au lieu de 96 × 96, architecture et entraînement de la config 5 | **95,56 %** au checkpoint 450 (500 itérations en **17,90 min**) | **244,9 ms** |
+| 7 · T4 | Comme la 6, mais rotation et changement d’échelle appliqués à 60 % des images au lieu de 30 % | À mesurer | À mesurer |
 
 Sur CPU, la config 1 finit par plafonner autour de 84 % alors que sa perte d’entraînement baisse encore. Avec la config 2, la perte de validation passe de 0,356 à 0,224 et l’accuracy continue de monter. La config 3 était encore en progression à son arrêt. À quantité de données vue égale (409 600 images), elle atteint 90,48 % contre 87,21 % pour la config 2 et 89,26 % pour la config 4.
 
-Sur T4, la config 4 tient le budget de temps. À partir de l’itération 250, les pertes d’entraînement et de validation augmentent ensemble. À 400, le réseau prédit « chat » pour les 2 048 images. Cela indique une instabilité d’entraînement. Avec la config 5, la validation remonte de 89,40 % à l’itération 200 à 94,29 % à 500. Ce checkpoint est le meilleur mesuré sous 300 ms. La config 6 utilise la marge de temps pour tester des images plus détaillées. [Logs des essais](notes.md)
+Sur T4, la config 4 tient le budget de temps. À partir de l’itération 250, les pertes d’entraînement et de validation augmentent ensemble. À 400, le réseau prédit « chat » pour les 2 048 images. Cela indique une instabilité d’entraînement. Avec la config 5, la validation remonte de 89,40 % à l’itération 200 à 94,29 % à 500. À 128 × 128, la config 6 gagne encore 1,27 point et reste sous 300 ms. Elle progresse de 94,68 % à 250 itérations à 95,56 % à 450, puis finit à 95,51 %. La config 7 teste l’effet d’une augmentation géométrique plus fréquente. [Logs des essais](notes.md)
 
-## Mesures restant à intégrer
-
-- **Q9 et Q34, sur le poste de la salle.** Depuis la racine du dépôt, lancer `bash mesures_rapport.sh`. Prévoir environ 4 à 8 min sur le poste de la salle. Après la chauffe, chaque point s’arrête au bout de trois mesures ou dès qu’une mesure terminée porte le cumul à 30 s. La limite de sécurité pour la campagne est de 45 min. Chaque point v6 est limité à 3 min. Le script réutilise les huit puissances stabilisées du tableau Q34 et les 20 W au repos. Il tourne sans intervention. Le script donne le meilleur débit par watt à la prise et enregistre aussi le débit rapporté au surcroît de puissance par rapport au repos.
-- **Q35–40.** Placer le fichier téléchargé depuis le notebook T4 dans `gpu_results/gpu.csv`, puis lancer `python gpu_bench.py report --cpu-watts 180 --gpu-watts 70`. Cette commande exploite le CSV CPU existant et génère les deux graphiques.
-- **CNN.** Reporter les résultats du checkpoint retenu et joindre ses poids `.dat` avec le notebook. Le temps mural des configurations 1 à 4 manque dans les logs. Les configs 5 et 6 le consignent dans `training.csv`.
+**Modèle retenu à ce stade.** Je garde le checkpoint 450 de la config 6. Il classe correctement 95,56 % des images en 244,9 ms, soit 55,1 ms sous le budget. Le résultat de la config 7 reste à intégrer avant le choix définitif et la remise des poids.
