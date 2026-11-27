@@ -24,19 +24,25 @@ Déplacer la boucle interne dans NumPy donne un gain de **57×**. Numba accélè
 
 **Q6–7.** Les deux figures comparent les mêmes opérations sur deux grilles de tailles. Le débit est exprimé en milliards de produits-accumulations par seconde selon la convention N³ du TP. Plus la courbe est haute, plus le calcul est rapide à taille égale.
 
+**Figure 1 — Multiplication en Python pour des tailles multiples de 128**
+
 ![Débit des quatre versions Python pour des tailles multiples de 128.](6.png)
 
-Les trois versions rapides chutent aux mêmes tailles, notamment à 1 024. Changer la façon de calculer la somme conserve le même parcours en colonne de B. Cela explique que les creux se retrouvent sur plusieurs courbes.
+*À N = 1 024, les trois variantes les plus rapides perdent du débit au même endroit. Toutes parcourent B colonne par colonne.*
+
+**Figure 2 — Effet du décalage des tailles en Python**
 
 ![Débit après décalage de la grille de tailles (96, 224, 352…).](7.png)
 
-Avec des tailles de 96, 224, 352, etc., les creux périodiques s’atténuent. Le pas entre deux lignes de B change avec N. Ce décalage réduit les conflits de cache, même si le produit matriciel reste le même.
+*Pour N = 96, 224, 352, etc., les creux de débit sont moins marqués. Le décalage change l’espacement des lectures de B et peut réduire les conflits de cache.*
 
 **Q8.** Les courbes de `@`, `np.matmul` et `np.dot` se rejoignent autour de 70 GFLOP/s sur les grandes matrices. Les trois utilisent une multiplication matricielle optimisée pour ces tableaux FP32. Les figures Python et C séquentiel comptent **N³** opérations. Les figures OpenMP et GPU comptent **2N³** (une multiplication et une addition). Les temps restent directement comparables.
 
+**Figure 3 — Comparaison des trois produits matriciels NumPy**
+
 ![Débits des trois fonctions de multiplication NumPy.](8.png)
 
-Les écarts entre les trois appels sont surtout visibles sur les petites matrices, où le coût de l’appel pèse davantage. Les courbes finissent sur le même plateau, ce qui est cohérent avec un calcul assuré par les mêmes routines optimisées.
+*Les débits de `@`, `np.dot` et `np.matmul` convergent vers le même plateau sur les grandes matrices. Le coût de chaque appel compte surtout sur les petites.*
 
 ### Q9–20 · C, accès mémoire et vectorisation
 
@@ -51,33 +57,41 @@ Temps moyens à **N = 1 920**, en secondes. La dernière colonne utilise `-O3 -m
 
 **Q9–11.** Sans option, v1 atteint seulement **0,55 %** du débit d’OpenBLAS dans la série répétée. Passer à `-O2` divise le temps par 3,4. `-O3` apporte peu ici. À la même taille, Numba prend **8,508 s** en moyenne sur trois passages hors compilation. Le code machine produit par Numba devance le C sans option (18,386 s). Activer les optimisations de GCC inverse le classement (5,394 s avec `-O2`).
 
+**Figure 4 — Effet d’un accumulateur local en C**
+
 ![Effet de l’accumulateur sur les versions C v1 et v2.](q11_13.png)
 
-Si les écritures dans C expliquaient les creux, la courbe de v2 devrait être plus lisse. Or v1 et v2 plongent ensemble à 1 024 et à 1 536. L’accumulateur améliore légèrement le débit moyen, mais laisse intact le grand pas entre deux lectures de A.
+*Les versions avec et sans accumulateur ralentissent toutes deux à N = 1 024 et 1 536. Réduire les écritures dans C conserve le même parcours à grands pas dans A.*
 
 **Q12–13.** v2 accumule chaque produit dans une variable locale et écrit C une seule fois en fin de boucle. Le gain est surtout visible sans optimisation. Avec les meilleurs réglages, le temps passe de 5,39 à 4,79 s. L’accès à une colonne avec un grand pas mémoire reste coûteux.
 
 **Q14–15.** Le code C stocke les matrices colonne par colonne. Transposer A permet de lire à la suite les valeurs de A et B nécessaires au produit scalaire. Avec `-O2`, le temps passe de 4,92 à 2,89 s, transposition comprise.
 
+**Figure 5 — Effet des options de compilation après transposition de A**
+
 ![Effet des options de compilation sur v3, avec OpenBLAS comme référence.](q15_17.png)
 
-La transposition rend les lectures contiguës dans les deux versions de v3. Les options de vectorisation font surtout la différence aux tailles intermédiaires. La version optimisée atteint 17,9 à N = 1 152, puis descend à 7,0 à N = 4 096. OpenBLAS reste proche de 70 sur les grandes tailles grâce à une meilleure réutilisation des données.
+*Le débit de v3 optimisée baisse entre N = 1 152 et 4 096 malgré des lectures contiguës. OpenBLAS maintient mieux son débit en réutilisant les données.*
 
 **Q16–17.** À 1 920, ajouter uniquement `-march=native` ou `-funroll-loops` à `-O3` laisse v3 près de 2,9 s. Avec `-ffast-math`, le compilateur peut réassocier la somme et le temps descend à **0,794 s**. Les trois options ensemble donnent **0,477 s**, soit **21 % d’OpenBLAS**. À 4 096, la courbe optimisée tombe à **7,0** contre **70,3** pour OpenBLAS. Les deux vecteurs sont contigus, mais chaque case de C exige une nouvelle lecture des deux vecteurs.
 
 **Q18–20.** v4 charge huit floats de A transposée et huit de B, multiplie les huit paires puis accumule dans huit sommes partielles. À la fin, on additionne ces huit sommes pour obtenir une case de C. Avec `-O2`, v4 prend 1,68 s contre 2,89 s pour v3. Avec toutes les options, **0,473 et 0,477 s** sont pratiquement identiques. La vectorisation manuelle apporte peu quand le compilateur vectorise déjà bien la boucle.
 
+**Figure 6 — Vectorisation par groupes de huit valeurs**
+
 ![Vectorisation explicite de v4 et référence OpenBLAS.](q20.png)
 
-Le débit de v4 culmine à 20,8 à N = 512, puis tombe à 6,9 à N = 4 096. Les vecteurs de huit floats accélèrent les multiplications, mais les lignes et colonnes nécessaires à chaque case de C occupent de plus en plus de cache. L’écart avec OpenBLAS grandit.
+*Le débit de v4 culmine à N = 512. Quand les matrices grandissent, les relectures de vecteurs pèsent davantage et l’écart avec OpenBLAS se creuse.*
 
 ### Q21–27 · Réutiliser les données dans les registres et les caches
 
 **Q21–23.** v5 calcule une tuile de C. Un vecteur de A sert à plusieurs colonnes, et un scalaire de B à plusieurs lignes. Les sommes partielles restent dans des registres pendant le parcours de K. À 1 920, v5 prend **10,58 / 3,61 / 5,22 / 4,76 s** sans option puis avec `-O1/-O2/-O3`. Avec toutes les options, elle descend à **0,249 s**, soit **41 % d’OpenBLAS**. À 3 840, elle atteint seulement **10,1** contre **73,6** pour OpenBLAS. La tuile améliore la réutilisation locale, mais les accès aux grandes matrices restent coûteux.
 
+**Figure 7 — Calcul par tuiles dans les registres**
+
 ![Débit du kernel par tuiles v5 selon la taille des matrices.](q23.png)
 
-v5 s’approche d’OpenBLAS sur les petites matrices, puis les courbes s’écartent. Réutiliser les valeurs dans une tuile de C suffit tant que les blocs de A et B restent facilement accessibles en cache. À grande taille, leur relecture d’une tuile à la suivante limite le débit.
+*Sur les petites matrices, v5 approche le débit d’OpenBLAS. À grande taille, les relectures de A et B d’une tuile à la suivante limitent le gain.*
 
 **Q24.** Une tuile de hauteur H et de largeur W demande `(H/8) × W` accumulateurs vectoriels, auxquels s’ajoutent les registres des opérandes.
 
@@ -91,9 +105,11 @@ v5 s’approche d’OpenBLAS sur les petites matrices, puis les courbes s’éca
 
 **Q25–27.** v6 découpe aussi M, N et K en blocs. Plusieurs appels au kernel réutilisent alors les mêmes données en cache. Dans la même série à 1 920, v4 prend **466 ms**, v5 **228 ms**, v6 **136 ms**. Parmi les dix découpages testés, **64/120/480** donne la meilleure moyenne, **133,4 ± 4,9 ms**, soit **77 % d’OpenBLAS**. Le découpage 64/120/240 est proche à 134,9 ms. À 3 840, v6 conserve **51,4** contre **73,9** pour OpenBLAS, alors que v5 est à **10,0**.
 
+**Figure 8 — Effet du découpage en blocs de cache**
+
 ![Effet du découpage en blocs de cache sur v6.](q27.png)
 
-La différence apparaît surtout à droite du graphique. À N = 3 840, v6 atteint encore 51,4 contre 10,0 pour v5. Le découpage de K permet de multiplier plusieurs tuiles avec les mêmes blocs de A et B avant de passer aux suivants. C’est ce qui permet à v6 de rester proche d’un plateau.
+*À N = 3 840, v6 conserve environ cinq fois le débit de v5. Plusieurs tuiles de C réutilisent les mêmes blocs de A et B en cache.*
 
 ### Q28–34 · OpenMP et énergie
 
@@ -101,13 +117,17 @@ La différence apparaît surtout à droite du graphique. À N = 3 840, v6 attein
 
 **Q30–32.** Avec M, `static,1` et les blocs 64/120/480, le débit passe de **109 GFLOP/s à 1 thread** à **444 à 8**, puis **600 à 20**. À 24 threads il retombe à **476**. Les deux courbes de speedup se superposent presque parce que les références sont très proches **(130,54 ms sans OpenMP et 129,96 ms avec un thread)**. À 20 threads, les gains correspondants sont **5,53× et 5,51×**.
 
+**Figure 9 — Débit selon le nombre de threads OpenMP**
+
 ![Débit de v6 en fonction du nombre de threads à N = 1 920.](openmp_results/q30.png)
 
-De 1 à 8 threads, quatre fois plus de produits sont calculés par seconde. Entre 8 et 20 threads, le gain est plus faible. Les cœurs P et E ont des débits différents, et deux threads d’un même cœur P partagent ses unités de calcul. À 24 threads, le débit recule alors que les 20 threads matériels sont déjà occupés.
+*À N = 1 920, le débit de v6 quadruple entre 1 et 8 threads, puis progresse plus lentement jusqu’à 20. À 24 threads, la demande dépasse les 20 threads matériels et le débit recule.*
+
+**Figure 10 — Accélération par rapport au calcul sur un thread**
 
 ![Accélération de v6 par rapport aux deux références à un thread.](openmp_results/q32.png)
 
-Un doublement idéal du débit à chaque doublement du nombre de threads donnerait une droite de pente 1. Ici, le gain atteint environ 4× à 8 threads, puis 5,5× à 20. Les deux courbes ont la même forme parce que seul le temps de référence change.
+*À 20 threads, v6 va environ 5,5 fois plus vite. Les courbes se superposent car les deux références, sans OpenMP et avec OpenMP à un thread, prennent presque le même temps.*
 
 **Q33.** Si la puissance double, `E(12)/E(1) = 2 × t(12)/t(1)`. Avec une répartition des blocs de v6 sur N en `static,4` et des blocs de 64/120/240, le rapport estimé vaut **0,645 pour v6** et **0,647 pour OpenBLAS**. Cela représente une économie d’environ **35 % d’énergie** dans les deux cas. Le gain de temps compense le doublement supposé de la puissance. En répartissant les blocs sur M avec le réglage `static,1` et des blocs de 64/120/480, le même calcul donne **0,457 pour v6**.
 
@@ -136,9 +156,11 @@ Un doublement idéal du débit à chaque doublement du nombre de threads donnera
 
 **Q36.** À 4 096, cuBLAS FP32 est **29,2×** plus rapide qu’OpenBLAS à un thread et **4,8×** plus rapide qu’à huit threads. Le T4 est déjà devant à la première taille testée (1 024). La multiplication offre assez de cases indépendantes pour exploiter le parallélisme du GPU à cette taille. À 16 384, il atteint **4 080 GFLOP/s**, contre **684** sur CPU.
 
+**Figure 11 — Multiplication FP32 sur le CPU de la salle et le GPU T4**
+
 ![Débit d’OpenBLAS sur huit threads et de cuBLAS FP32 sur T4.](gpu_results/q36_cpu_gpu.png)
 
-Le GPU atteint son pic à N = 2 048, le CPU à N = 4 096. Au-delà, les débits fluctuent puis se stabilisent à des niveaux distincts. Agrandir les matrices fournit d’abord plus de travail parallèle. Une fois les unités de calcul bien occupées, ajouter du travail augmente surtout le temps total.
+*cuBLAS sur T4 dépasse OpenBLAS sur huit threads dès N = 1 024. Le débit culmine à N = 2 048 sur GPU et à N = 4 096 sur CPU, puis augmente peu avec la taille.*
 
 **Q37.** Avec la puissance turbo maximale publiée par Intel pour le i7-12700 (**180 W**), le CPU atteint au mieux **857/180 = 4,76 GFLOP/J**, à 4 096. En supposant une puissance de **70 W** pour le GPU, le T4 en FP32 atteint **7 377/70 = 105,4 GFLOP/J**, à 2 048. Le rapport estimé vaut **22×**. Ces chiffres utilisent une puissance constante sur toute la courbe.
 
@@ -148,9 +170,11 @@ Le GPU atteint son pic à N = 2 048, le CPU à N = 4 096. Au-delà, les débits 
 
 **Q40.** GemmEx atteint son meilleur débit à **5 120** (49,9 TFLOP/s), contre **2 048** pour cuBLAS FP32 (7,38 TFLOP/s). À 5 120, GemmEx est **13,6×** plus rapide que cuBLAS FP32. Ce chiffre dépasse le rapport théorique des pics (environ 8×) parce qu’à cette taille le FP32 mesuré est déjà loin de son pic. Le rapport entre les deux meilleurs débits mesurés vaut **6,8×**.
 
+**Figure 12 — Débit des quatre versions de multiplication sur T4**
+
 ![Débit des quatre versions CUDA sur T4.](gpu_results/q38_q40_cuda.png)
 
-Les tuiles et les Tensor Cores apportent deux gains distincts. Les tuiles réduisent les relectures en mémoire globale et placent le kernel loin au-dessus du naïf. GemmEx accélère aussi le calcul matriciel en précision mixte. Sa courbe atteint son pic plus tard que cuBLAS FP32 (5 120 contre 2 048). Les mesures seules ne permettent pas d’attribuer chacun de ses creux à un mécanisme précis.
+*Le calcul par tuiles dépasse le kernel naïf en réutilisant les données. GemmEx, qui utilise les Tensor Cores en précision mixte, atteint le débit le plus élevé à N = 5 120.*
 
 **Conclusion sur la multiplication matricielle.** Sur CPU, à 1 920, le découpage en blocs de cache ramène le temps de 228 à 136 ms entre v5 et v6. À 9 600, le meilleur compromis mesuré est de 20 threads, avec 4,70 s et 2,40 GFLOP/J à la prise. Sur T4, à 4 096, le passage du kernel naïf au kernel par tuiles réduit le temps de 3,05 s à 64,8 ms. Dans les deux cas, réutiliser les données améliore le débit.
 
